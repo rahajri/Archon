@@ -10423,7 +10423,19 @@ async function runLayers(parentCtx: RunLayersContext): Promise<void> {
               { state: 'failed', output: '', error: 'Node did not execute' },
               iteration
             );
-            const output = await assertCheckoutUntouched(
+
+            // A read-only, fresh-context agent may fail over once to the configured
+            // default assistant after the primary provider has exhausted its own retry
+            // policy. This keeps review/validation moving across provider quota or
+            // temporary capacity failures without ever replaying a mutating node.
+            //
+            // Provider failures are typed; never infer fallback eligibility from error
+            // prose. Budget/auth/config/output-contract failures deliberately remain
+            // terminal.
+            // Enforce the read-only contract on the primary provider before any
+            // cross-provider fallback. A provider that touched the checkout must never
+            // hand its modified tree to the fallback provider.
+            const checkedPrimaryOutput = await assertCheckoutUntouched(
               node,
               ctx.cwd,
               checkoutExcludes,
@@ -10433,6 +10445,141 @@ async function runLayers(parentCtx: RunLayersContext): Promise<void> {
               ctx.logDir,
               ctx.guardedLayerSnapshots
             );
+
+            const fallbackFailureClass =
+              checkedPrimaryOutput.state === 'failed'
+                ? checkedPrimaryOutput.providerFailure?.class
+                : undefined;
+            const fallbackProvider = ctx.config.assistant;
+            const fallbackClasses: ReadonlySet<ProviderFailure['class']> = new Set([
+              'quota_exhausted',
+              'rate_limited',
+              'overloaded',
+              'transient',
+            ]);
+
+            if (
+              node.mutates_checkout === false &&
+              node.context === 'fresh' &&
+              !usesPersistedScope &&
+              fallbackProvider !== provider &&
+              fallbackFailureClass !== undefined &&
+              fallbackClasses.has(fallbackFailureClass)
+            ) {
+              const configuredFallbackModel = ctx.config.assistants[fallbackProvider]?.model;
+
+              const fallbackNode: AgentNode = {
+                ...node,
+                provider: fallbackProvider,
+                context: 'fresh',
+              };
+
+              // Never keep the primary tier/model reference: `medium`, for example,
+              // resolves back to Codex. Use the fallback provider's configured model
+              // explicitly when one exists (for example claude -> opus).
+              delete fallbackNode.model;
+              if (typeof configuredFallbackModel === 'string') {
+                fallbackNode.model = configuredFallbackModel;
+              }
+
+              // Preserve the reasoning depth selected for the primary tier where the
+              // fallback provider supports it.
+              if (resolvedEffort !== undefined) {
+                fallbackNode.effort = resolvedEffort;
+              }
+
+              const {
+                provider: resolvedFallbackProvider,
+                model: resolvedFallbackModel,
+                options: fallbackNodeOptions,
+                tier: resolvedFallbackTier,
+                effort: resolvedFallbackEffort,
+              } = await resolveNodeProviderAndModel(
+                providers,
+                fallbackNode,
+                ctx.workflowProvider,
+                ctx.workflowModel,
+                ctx.config,
+                ctx.platform,
+                ctx.conversationId,
+                ctx.workflowRun.id,
+                ctx.cwd,
+                ctx.workflowLevelOptions,
+                ctx.aiProfile,
+                ctx.workflowPreset,
+                resolveAiConfigText,
+                ctx.warnedProviderConflicts,
+                ctx.execContext
+              );
+
+              getLog().warn(
+                {
+                  nodeId: node.id,
+                  primaryProvider: provider,
+                  fallbackProvider: resolvedFallbackProvider,
+                  failureClass: fallbackFailureClass,
+                },
+                'dag.read_only_provider_fallback'
+              );
+
+              await safeSendMessage(
+                ctx.platform,
+                ctx.conversationId,
+                `⚠️ Node \`${node.id}\`: provider \`${provider}\` unavailable (${fallbackFailureClass}) after its retry policy — retrying this read-only step with \`${resolvedFallbackProvider}\`.`,
+                { workflowId: ctx.workflowRun.id, nodeName: node.id }
+              );
+
+              const fallbackOutput = await runNodeRetryLoop(
+                fallbackNode,
+                ctx.platform,
+                ctx.conversationId,
+                ctx.workflowRun,
+                ctx.deps.store,
+                ctx.stepNamePrefix + node.id,
+                getEffectiveNodeRetryConfig(fallbackNode),
+                async () => {
+                  const fallbackTypedArtifactsFile = await writeNodeArtifactsListing(
+                    ctx.artifactsDir,
+                    ctx.workflowRun.id
+                  );
+                  return executeNodeInternal(
+                    ctx,
+                    fallbackNode,
+                    resolvedFallbackProvider,
+                    fallbackNodeOptions,
+                    undefined,
+                    resolvedFallbackModel,
+                    resolvedFallbackTier,
+                    resolvedFallbackEffort,
+                    ctx.stepNamePrefix,
+                    iteration,
+                    checkpointSessionForProvider(resolvedFallbackProvider),
+                    fallbackTypedArtifactsFile
+                  );
+                },
+                { state: 'failed', output: '', error: 'Fallback node did not execute' },
+                iteration
+              );
+
+              const checkedFallbackOutput = await assertCheckoutUntouched(
+                node,
+                ctx.cwd,
+                checkoutExcludes,
+                treeBefore,
+                fallbackOutput,
+                ctx.deps,
+                ctx.logDir,
+                ctx.guardedLayerSnapshots
+              );
+
+              return {
+                nodeId: node.id,
+                output: checkedFallbackOutput,
+                sessionProvider: resolvedFallbackProvider,
+              };
+            }
+
+            const output = checkedPrimaryOutput;
 
             // Cold-resume surfacing: this node requested a session resume but the
             // provider reported it came back cold (resumed === false) — the prior
