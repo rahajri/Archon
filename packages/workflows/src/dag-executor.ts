@@ -10424,10 +10424,13 @@ async function runLayers(parentCtx: RunLayersContext): Promise<void> {
               iteration
             );
 
-            // A read-only, fresh-context agent may fail over once to the configured
-            // default assistant after the primary provider has exhausted its own retry
-            // policy. This keeps review/validation moving across provider quota or
-            // temporary capacity failures without ever replaying a mutating node.
+            // A read-only agent that actually started without a prior provider session
+            // may fail over once to the configured default assistant after the primary
+            // provider has exhausted its own retry policy. Runtime session state is the
+            // authority: a node can be effectively fresh without declaring context:'fresh'
+            // (for example at a composed-block entry or when no sequential cursor exists).
+            // This keeps review/validation moving across provider quota or temporary
+            // capacity failures without replaying a mutating or stateful node.
             //
             // Provider failures are typed; never infer fallback eligibility from error
             // prose. Budget/auth/config/output-contract failures deliberately remain
@@ -10460,7 +10463,7 @@ async function runLayers(parentCtx: RunLayersContext): Promise<void> {
 
             if (
               node.mutates_checkout === false &&
-              node.context === 'fresh' &&
+              resumeSessionId === undefined &&
               !usesPersistedScope &&
               fallbackProvider !== provider &&
               fallbackFailureClass !== undefined &&

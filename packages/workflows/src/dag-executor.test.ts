@@ -16509,6 +16509,160 @@ describe('executeDagWorkflow -- credit exhaustion', () => {
     expect(completed[0]?.data?.model).toBe('opus');
   });
 
+  it('falls back for a read-only agent that is effectively fresh without explicit context', async () => {
+    const codexQuery = mock<ReturnType<WorkflowDeps['getAgentProvider']>['sendQuery']>(
+      async function* (_prompt, _cwd, resumeSessionId) {
+        expect(resumeSessionId).toBeUndefined();
+        yield {
+          type: 'result',
+          isError: true,
+          failure: {
+            class: 'quota_exhausted',
+            evidence: 'Codex usage limit reached',
+          },
+        };
+      }
+    );
+
+    const claudeQuery = mock<ReturnType<WorkflowDeps['getAgentProvider']>['sendQuery']>(
+      async function* (_prompt, _cwd, resumeSessionId, options) {
+        expect(resumeSessionId).toBeUndefined();
+        expect(options?.model).toBe('opus');
+        yield { type: 'agent_message_chunk', text: 'Reviewed by Claude' };
+        yield { type: 'result', sessionId: 'claude-effective-fresh-fallback' };
+      }
+    );
+
+    mockGetAgentProviderDag.mockImplementation(provider => ({
+      sendQuery: provider === 'codex' ? codexQuery : claudeQuery,
+      checkCredential: async () => ({ state: 'not_checked' as const, source: 'native' as const }),
+      getType: () => provider,
+      getCapabilities: mockClaudeCapabilities,
+    }));
+
+    const store = createMockStore();
+
+    await executeDagWorkflow(
+      dagOptions({
+        deps: createMockDeps(store),
+        platform: createMockPlatform(),
+        cwd: testDir,
+        config: {
+          ...minimalConfig,
+          assistant: 'claude',
+          assistants: {
+            claude: { model: 'opus' },
+            codex: { model: 'gpt-6-astra' },
+          },
+        },
+        workflow: {
+          name: 'cross-provider-effective-fresh-fallback',
+          nodes: [
+            {
+              id: 'triage',
+              kind: 'agent',
+              source: { kind: 'inline', prompt: 'Triage this issue' },
+              provider: 'codex',
+              mutates_checkout: false,
+            },
+          ],
+        },
+        workflowRun: makeWorkflowRun('cross-provider-effective-fresh-fallback-run'),
+      })
+    );
+
+    expect(codexQuery).toHaveBeenCalledTimes(1);
+    expect(claudeQuery).toHaveBeenCalledTimes(1);
+    expect(store.completeWorkflowRun).toHaveBeenCalledTimes(1);
+    expect(store.failWorkflowRun).not.toHaveBeenCalled();
+  });
+
+  it('does not fall back when the primary agent actually resumes a prior session', async () => {
+    let codexCalls = 0;
+
+    const codexQuery = mock<ReturnType<WorkflowDeps['getAgentProvider']>['sendQuery']>(
+      async function* (_prompt, _cwd, resumeSessionId) {
+        codexCalls += 1;
+
+        if (codexCalls === 1) {
+          expect(resumeSessionId).toBeUndefined();
+          yield { type: 'agent_message_chunk', text: 'Seed context' };
+          yield { type: 'result', sessionId: 'codex-seed-session' };
+          return;
+        }
+
+        expect(resumeSessionId).toBe('codex-seed-session');
+        yield {
+          type: 'result',
+          isError: true,
+          failure: {
+            class: 'quota_exhausted',
+            evidence: 'Codex usage limit reached',
+          },
+        };
+      }
+    );
+
+    const claudeQuery = mock<ReturnType<WorkflowDeps['getAgentProvider']>['sendQuery']>(
+      async function* () {
+        yield { type: 'agent_message_chunk', text: 'must not run' };
+        yield { type: 'result', sessionId: 'unexpected-fallback' };
+      }
+    );
+
+    mockGetAgentProviderDag.mockImplementation(provider => ({
+      sendQuery: provider === 'codex' ? codexQuery : claudeQuery,
+      checkCredential: async () => ({ state: 'not_checked' as const, source: 'native' as const }),
+      getType: () => provider,
+      getCapabilities: mockClaudeCapabilities,
+    }));
+
+    const store = createMockStore();
+
+    await executeDagWorkflow(
+      dagOptions({
+        deps: createMockDeps(store),
+        platform: createMockPlatform(),
+        cwd: testDir,
+        config: {
+          ...minimalConfig,
+          assistant: 'claude',
+          assistants: {
+            claude: { model: 'opus' },
+            codex: { model: 'gpt-6-astra' },
+          },
+        },
+        workflow: {
+          name: 'cross-provider-resumed-session-no-fallback',
+          nodes: [
+            {
+              id: 'seed',
+              kind: 'agent',
+              source: { kind: 'inline', prompt: 'Establish context' },
+              provider: 'codex',
+              mutates_checkout: false,
+            },
+            {
+              id: 'review',
+              kind: 'agent',
+              source: { kind: 'inline', prompt: 'Continue review' },
+              provider: 'codex',
+              context: 'shared',
+              mutates_checkout: false,
+              depends_on: ['seed'],
+            },
+          ],
+        },
+        workflowRun: makeWorkflowRun('cross-provider-resumed-session-no-fallback-run'),
+      })
+    );
+
+    expect(codexQuery).toHaveBeenCalledTimes(2);
+    expect(claudeQuery).not.toHaveBeenCalled();
+    expect(store.failWorkflowRun).toHaveBeenCalledTimes(1);
+    expect(store.completeWorkflowRun).not.toHaveBeenCalled();
+  });
+
   it('does not bypass a budget_exceeded failure with the fallback provider', async () => {
     const codexQuery = mock<ReturnType<WorkflowDeps['getAgentProvider']>['sendQuery']>(
       async function* () {
