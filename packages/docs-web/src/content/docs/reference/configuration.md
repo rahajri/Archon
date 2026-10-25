@@ -79,6 +79,10 @@ Create `~/.archon/config.yaml` for user-wide preferences:
 # Default AI assistant
 defaultAssistant: claude # must match a registered provider (e.g. claude, codex)
 
+# Cross-provider fallback for eligible read-only AI workflow nodes.
+# Global-only operator policy; disabled by default.
+# crossProviderFallback: true
+
 # Assistant defaults
 assistants:
   claude:
@@ -166,7 +170,7 @@ Invalid assistants config in '/Users/you/.archon/config.yaml':
 
 `archon doctor` reports the same failure as the **Config files** check. To repair `~/.archon/config.yaml` through Archon, change the invalid value from the console settings; any other settings, `archon ai tier set`, or `archon ai alias set` change is refused until that value is fixed, because Archon validates the whole file before writing it. An `assistants:` entry for a provider this install has not registered is ignored, as before — there is no provider to validate it.
 
-The other blocks, `tiers`, `aliases`, `workflows`, `streaming`, `attentionNotices` and `concurrency`, fail the same way when their own check refuses a value. So does a file that is not valid YAML, whose top level is not a map of settings, or that Archon cannot read. The failure names the file and stops startup, `archon doctor`, run starts, chat messages and workflow listings such as `archon workflow list`; Archon never loads the file with that block replaced by defaults. Only a missing file falls back: `~/.archon/config.yaml` is created from the template, and a missing repository config uses defaults.
+The other validated settings and blocks, including `crossProviderFallback`, `tiers`, `aliases`, `workflows`, `streaming`, `attentionNotices` and `concurrency`, fail the same way when their own check refuses a value. So does a file that is not valid YAML, whose top level is not a map of settings, or that Archon cannot read. The failure names the file and stops startup, `archon doctor`, run starts, chat messages and workflow listings such as `archon workflow list`; Archon never loads the file with that block replaced by defaults. Only a missing file falls back: `~/.archon/config.yaml` is created from the template, and a missing repository config uses defaults.
 
 ## Provider concurrency caps
 
@@ -205,6 +209,7 @@ Run config accepts settings whose consumers still execute after the run is dispa
 - `commands` and `defaults` already affected workflow and command discovery.
 - `worktree` and `container` already affected isolation.
 - `botName`, `streaming`, `paths`, and `concurrency` are process-scoped or have no per-run consumer.
+- `crossProviderFallback` is global-only and can be set only in `~/.archon/config.yaml`; repository config and per-run config cannot enable it.
 - `recommendedWorkflows` is listing-only.
 - `assistants.pi.env` and `assistants.pi.maxConcurrent` are install settings rather than per-run settings. Pi concurrency is enforced at host admission for process providers; bundled Pi also retains its in-process semaphore.
 
@@ -875,11 +880,13 @@ The threshold follows the same global, repository, and run-scoped `workflows` la
 
 Attention stores only ids, timestamps, and bounded display fields. It never copies raw tool inputs, outputs, assistant messages, or reasoning from provider transcripts. Commands are redacted against known credentials from the effective environment and protected credential values, including file-delivered credentials. Arbitrary secrets unknown to Archon cannot be discovered by that redaction.
 
-This policy is separate from per-node `retry:`. Quota exhaustion is terminal for the current attempt, because retrying in the same provider window only repeats the failure. When the attempt fails this way and the provider reported when the limit resets, the run does not fail. It pauses in a durable wait until that time, and a continuation host continues it once: `archon serve`, `archon workflow wake`, or the CLI process that started the run. The nodes that hit the limit run again. If they hit a limit again, the run waits again, until the new reset. `workflow status`, `workflow get`, the attention queue (item kind `usage_limit`) and the console show the wait with its node and reset time. Cancel or abandon the run to stop it.
+This policy is separate from per-node `retry:`. Quota exhaustion is terminal for the current attempt, because retrying in the same provider window only repeats the failure. With global `crossProviderFallback: true`, an eligible read-only AI node first tries the configured default `assistant` provider after the primary provider-limit failure. A successful fallback completes the node without creating a provider-limit wait. If fallback is ineligible, cannot be prepared safely, or fails ordinarily, the primary provider-limit failure remains in force; cancellation or a read-only checkout violation during fallback remains terminal.
+
+When the primary provider-limit failure remains in force and the provider reported when the limit resets, the run does not fail. It pauses in a durable wait until that time, and a continuation host continues it once: `archon serve`, `archon workflow wake`, or the CLI process that started the run. The nodes that hit the limit run again. If they hit a limit again, the run waits again, until the new reset. `workflow status`, `workflow get`, the attention queue (item kind `usage_limit`) and the console show the wait with its node and reset time. Cancel or abandon the run to stop it.
 
 The run waits only when every node that failed in that pass hit a usage limit with a reported reset, or a rate limit (below), and the latest of those deadlines is still ahead. This also applies to failed descendants inside loop groups and fan-outs. A node that failed downstream of another failed node, such as an `all_done` node reading a limited node's output, does not prevent the wait, whatever its own error was; it runs again when the run continues, and if it then fails after its upstream succeeded, that failure fails the run. A usage limit whose reset has already passed does not prevent waiting for another node's later deadline: when the run continues, both failed nodes retry. Any other failure, a usage limit without a reset time, or no deadline still ahead fails the run as before. Archon never guesses when a usage limit resets. A container run also fails, because the continuation host cannot continue one; resume it by hand.
 
-A rate limit (`rate_limited`, such as HTTP 429) that still refuses a node after its retries takes the same wait. Its deadline is the provider's reset when the failure reports one that is still ahead; otherwise Archon waits a computed backoff of 5 to 15 minutes, jittered so runs limited together do not retry together. Resume the run to try sooner.
+A rate limit (`rate_limited`, such as HTTP 429) that still refuses a node after its retries and remains the effective primary failure after any eligible cross-provider fallback path takes the same wait. Its deadline is the provider's reset when the failure reports one that is still ahead; otherwise Archon waits a computed backoff of 5 to 15 minutes, jittered so runs limited together do not retry together. Resume the run to try sooner.
 
 Only a provider's typed failure starts the wait; Archon never reads the error text for it. Claude reports a `quota_exhausted` failure, with the reset time, when its subscription window rejects a request or its credit balance runs out. Codex reports `quota_exhausted` when its usage limit is reached, with the reset time of the usage window that is full. Pi does not: its SDK passes Archon only the error text, with no limit signal or reset time, so a Pi run that hits a usage limit fails, and you resume it once the limit reopens. No other provider reports a structured quota signal.
 

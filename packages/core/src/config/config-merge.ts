@@ -205,6 +205,10 @@ export function mergeGlobalConfig(defaults: MergedConfig, global: GlobalConfig):
     result.botName = global.botName;
   }
 
+  if (global.crossProviderFallback !== undefined) {
+    result.crossProviderFallback = global.crossProviderFallback;
+  }
+
   // Assistant preference — validate against registry
   if (global.defaultAssistant) {
     if (isRegisteredProvider(global.defaultAssistant)) {

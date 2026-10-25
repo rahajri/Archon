@@ -187,6 +187,8 @@ export function attentionAnswerLines(
 export interface WorkflowConfig {
   /** Default assistant provider (validated against provider registry at runtime) */
   assistant: string | undefined;
+  /** Explicit operator opt-in for cross-provider fallback. */
+  crossProviderFallback?: boolean;
   baseBranch?: string;
   remote?: string;
   docsPath?: string;

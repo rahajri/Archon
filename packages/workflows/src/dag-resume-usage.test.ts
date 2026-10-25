@@ -122,6 +122,38 @@ describe('historical token accounting', () => {
   });
 });
 
+describe('durable audit rows', () => {
+  it('keeps a prior node failure when provider_fallback is the trailing durable row', async () => {
+    const snapshot = await foldDagResumeSnapshot(
+      [
+        {
+          step_name: 'review',
+          event_type: 'node_failed',
+          data: {
+            error: 'Primary provider failed',
+            failure_kind: 'overloaded',
+          },
+        },
+        {
+          step_name: 'review',
+          event_type: 'provider_fallback',
+          data: {
+            primary_provider: 'codex',
+            fallback_provider: 'claude',
+            failure_class: 'quota_exhausted',
+          },
+        },
+      ],
+      'run'
+    );
+
+    expect(snapshot.failedNodes.get('review')).toEqual({
+      error: 'Primary provider failed',
+      failureKind: 'overloaded',
+    });
+  });
+});
+
 describe('historical cost floor', () => {
   const attempt = (path: string, costUsd?: number): DagResumeEvent[] => {
     const start = startNodeExecution({

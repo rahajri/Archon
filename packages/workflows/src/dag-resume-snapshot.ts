@@ -508,7 +508,8 @@ function foldChildUsage(fold: ResumeFold, record: NodeRecord): void {
 
 async function foldNodeRow(fold: ResumeFold, row: FoldedRow): Promise<void> {
   const nodeStateType = NODE_STATE_EVENT_TYPES.find(type => type === row.event_type);
-  if (nodeStateType) foldActiveNodeIds(fold.unresolvedNodeStarts, row.step_name, nodeStateType);
+  if (!nodeStateType) return;
+  foldActiveNodeIds(fold.unresolvedNodeStarts, row.step_name, nodeStateType);
   // Every later node state supersedes reusable success, even when that row
   // carries no output (or its data cannot be recovered). Only success restores it.
   fold.completedNodeOutputs.delete(row.step_name);
@@ -550,6 +551,7 @@ async function foldRow(fold: ResumeFold, row: FoldedRow): Promise<void> {
       return;
     default:
       await foldNodeRow(fold, row);
+      return;
   }
 }
 

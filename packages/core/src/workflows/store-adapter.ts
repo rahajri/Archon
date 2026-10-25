@@ -88,6 +88,23 @@ import { sealWorkflowRunConfig, unsealWorkflowRunConfig } from '../config/run-co
 const assertConfigCompat: WorkflowConfig = {} as MergedConfig;
 void assertConfigCompat;
 
+// WorkflowConfig also contains three engine-injected values that are not part
+// of persisted MergedConfig. Every other WorkflowConfig key must be owned by
+// MergedConfig, including optional keys: ordinary structural assignment does
+// not detect an optional-key rename.
+type WorkflowConfigEngineInjectedKeys =
+  | 'protectedEnvKeys'
+  | 'userCredentialEnvKeys'
+  | 'protectedCredentialValues';
+
+type SameKeySet<A, B> = [Exclude<A, B>, Exclude<B, A>] extends [never, never] ? true : false;
+
+const assertWorkflowConfigKeyCoverage: SameKeySet<
+  Exclude<keyof WorkflowConfig, keyof MergedConfig>,
+  WorkflowConfigEngineInjectedKeys
+> = true;
+void assertWorkflowConfigKeyCoverage;
+
 let cachedLog: ReturnType<typeof createLogger> | undefined;
 function getLog(): ReturnType<typeof createLogger> {
   if (!cachedLog) cachedLog = createLogger('workflow.store-adapter');

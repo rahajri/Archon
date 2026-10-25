@@ -53,6 +53,9 @@ export const DURABLE_WORKFLOW_EVENT_TYPES = [
   ...WORKTREE_SETUP_EVENT_TYPES,
   DEFERRED_NODE_USAGE_EVENT_TYPE,
   RUN_BUDGET_WORK_UNIT_EVENT_TYPE,
+  // A cross-provider switch is part of the run's execution history: execution
+  // must not proceed to the fallback provider unless this audit row persists.
+  'provider_fallback',
 ] as const;
 export type DurableWorkflowEventType = (typeof DURABLE_WORKFLOW_EVENT_TYPES)[number];
 export type DurableNodeEventInput =

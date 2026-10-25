@@ -115,6 +115,10 @@ describe('workflow run config', () => {
       )
     ).toThrow("Invalid run config at 'workflows'");
 
+    expect(() =>
+      parseWorkflowRunConfig({ crossProviderFallback: true }, { kind: 'http', label: 'inline' })
+    ).toThrow("Run config key 'crossProviderFallback' cannot apply");
+
     for (const key of [
       'commands',
       'defaults',

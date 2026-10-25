@@ -65,6 +65,10 @@ const keyClassifications = {
     kind: 'unavailable',
     reason: 'the bot identity is process-scoped and has no per-run consumer',
   },
+  crossProviderFallback: {
+    kind: 'unavailable',
+    reason: 'cross-provider fallback is an install-scoped operator opt-in',
+  },
   streaming: {
     kind: 'unavailable',
     reason: 'platform response streaming is process-scoped and has no per-run consumer',

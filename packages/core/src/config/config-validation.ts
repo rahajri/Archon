@@ -157,6 +157,17 @@ export function validateAttentionNoticesConfig(parsed: unknown, configPath: stri
   parsed.attentionNotices = result.data;
 }
 
+export function validateCrossProviderFallbackConfig(parsed: unknown, configPath: string): void {
+  if (!isConfigRecord(parsed) || parsed.crossProviderFallback === undefined) return;
+  if (typeof parsed.crossProviderFallback !== 'boolean') {
+    throw new InvalidConfigError(
+      'Invalid cross-provider fallback config',
+      configPath,
+      "'crossProviderFallback' must be a boolean."
+    );
+  }
+}
+
 export function validateConversationConcurrencyConfig(parsed: unknown, configPath: string): void {
   if (!isConfigRecord(parsed) || parsed.concurrency == null) return;
   if (!isConfigRecord(parsed.concurrency)) {
@@ -187,4 +198,5 @@ export function validateGlobalConfigBlocks(parsed: unknown, configPath: string):
   validateStreamingConfig(parsed, configPath);
   validateAttentionNoticesConfig(parsed, configPath);
   validateConversationConcurrencyConfig(parsed, configPath);
+  validateCrossProviderFallbackConfig(parsed, configPath);
 }
