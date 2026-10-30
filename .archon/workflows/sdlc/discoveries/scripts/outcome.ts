@@ -35,6 +35,7 @@ import {
   type FilingTarget,
   filedDiscoveries,
   filingsOf,
+  filingTargetOf,
   mentionsDiscoveryMetadata,
   parseFilingTarget,
   parseRunDocument,
@@ -42,6 +43,7 @@ import {
   type Queue,
   refRun,
   runName,
+  sameFilingTarget,
 } from '../../.shared/discoveries.ts';
 import { forgeSource, type QualifiedPr, sameRepo } from '../../.shared/forge.ts';
 import { artifactsDir, emit, nullableJson, refuse, text, trimmed } from '../../.shared/io.ts';
@@ -121,11 +123,8 @@ function trackingProblem(decision: AgentDecision & { outcome: 'track' }, repo: Q
 /** The tracker to file into: the checkout's, refused unless it is still the target facts chose. */
 function chosenTracker(target: FilingTarget, repo: QualifiedPr['repo']): ArchonTracker | null {
   const tracker = declaredArchonTracker(process.cwd(), repo, process.env.ARCHON_TRACKER_BASE_URL);
-  const current: FilingTarget =
-    tracker === null
-      ? { tracker: 'github', archon_project_id: '' }
-      : { tracker: 'archon', archon_project_id: tracker.context.archonProjectId };
-  if (current.tracker !== target.tracker || current.archon_project_id !== target.archon_project_id) {
+  const current = filingTargetOf(tracker);
+  if (!sameFilingTarget(current, target)) {
     throw new Error(
       `nothing was written: facts chose ${describeFilingTarget(target)} for this pass, but the checkout's project now files into ${describeFilingTarget(current)}`
     );

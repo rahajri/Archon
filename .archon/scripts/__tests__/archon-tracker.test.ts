@@ -301,13 +301,21 @@ describe('ArchonTracker', () => {
   ])('refuses a created task the tracker %s, naming the field and the task', async (_case, changes, field) => {
     const { tracker } = trackerWith(json({ task: task('t1') }), json(stored(changes)));
     await expect(tracker.createTask(newTask)).rejects.toThrow(
-      `the tracker created task t1 but reads back a different ${field}; a later pass could not recover it`
+      `the tracker created task t1 but reads back a different ${field} than was sent, so it is not reported as filed. Check it before running again: a later pass recovers it as filed if its archon-discovery header is intact and it is in project ${PROJECT_ID}.`
     );
+  });
+
+  test('verifies every field it sends, not a list of its own', async () => {
+    const sentWithMore = { ...newTask, assignee: 'Archon' };
+    const { tracker } = trackerWith(json({ task: task('t1') }), json(stored()));
+    await expect(tracker.createTask(sentWithMore)).rejects.toThrow('reads back a different assignee than was sent');
   });
 
   test('refuses a created task that does not read back as a task', async () => {
     const { tracker } = trackerWith(json({ task: task('t1') }), new Response('{"detail":"Task not found"}', { status: 404 }));
     await expect(tracker.createTask(newTask)).rejects.toThrow('GET /api/tasks/t1 failed with 404');
+    const { tracker: listing } = trackerWith(json({ task: task('t1') }), json([stored()]));
+    await expect(listing.createTask(newTask)).rejects.toThrow('the tracker reads back task t1 as something that is not a task');
   });
 
   test.each([

@@ -14,7 +14,8 @@
  * agent gives it this time.
  */
 
-import type { ArchonTask } from './archon-tracker.ts';
+import { isDeepStrictEqual } from 'node:util';
+import type { ArchonTask, ArchonTracker } from './archon-tracker.ts';
 import type { QualifiedPr } from './forge.ts';
 import type { fetchDefaultBranch } from './remote.ts';
 import type { DiscoveryRecord } from './report.ts';
@@ -185,9 +186,9 @@ export type FilingTarget =
   | { readonly tracker: 'archon'; readonly archon_project_id: string };
 
 /**
- * Each tracker a target can name, with the target an Archon project id makes of it. The
- * mapped type admits exactly `FilingTarget`'s trackers, and the workflow's tracker enum
- * is held to these keys by `discoveries.test.ts`.
+ * Each tracker a target can name, with the target an Archon project id makes of it. Every
+ * `FilingTarget` is built here. The mapped type admits exactly `FilingTarget`'s trackers,
+ * and the workflow's tracker enum is held to these keys by `discoveries.test.ts`.
  */
 const FILING_TARGETS: { readonly [T in FilingTarget['tracker']]: (archonProjectId: string) => FilingTarget | null } = {
   github: id => (id === '' ? { tracker: 'github', archon_project_id: '' } : null),
@@ -204,6 +205,16 @@ export function parseFilingTarget(tracker: string, archonProjectId: string): Fil
   const target = isFilingTracker(tracker) ? FILING_TARGETS[tracker](archonProjectId) : null;
   if (target === null) throw new Error(`"${tracker}" with Archon project "${archonProjectId}" is not a filing target`);
   return target;
+}
+
+/** The target a checkout's declared tracker files into: GitHub issues when it declares none. */
+export function filingTargetOf(tracker: ArchonTracker | null): FilingTarget {
+  return tracker === null ? parseFilingTarget('github', '') : parseFilingTarget('archon', tracker.context.archonProjectId);
+}
+
+/** Whether two targets file into the same place, compared on every field they carry. */
+export function sameFilingTarget(a: FilingTarget, b: FilingTarget): boolean {
+  return isDeepStrictEqual(a, b);
 }
 
 export function describeFilingTarget(target: FilingTarget): string {

@@ -722,23 +722,33 @@ describe('filing discoveries into the Archon tracker', () => {
   }, 60_000);
 
   test.each([
-    ['strips HTML comments', "task => ({ ...task, description: task.description.replace(/<!--[^]*?-->\\n?/g, '') })", 'description'],
-    ['truncates the description', 'task => ({ ...task, description: task.description.slice(0, 30) })', 'description'],
-    ['alters the title', "task => ({ ...task, title: task.title + ' (imported)' })", 'title'],
-    ['alters the status', "task => ({ ...task, status: 'backlog' })", 'status'],
-  ])('a tracker that %s on create fails the filing instead of reporting it', (_case, stores, field) => {
+    ['strips HTML comments', "task => ({ ...task, description: task.description.replace(/<!--[^]*?-->\\n?/g, '') })", 'description', false],
+    ['truncates the description', 'task => ({ ...task, description: task.description.slice(0, 30) })', 'description', false],
+    ['alters the title', "task => ({ ...task, title: task.title + ' (imported)' })", 'title', true],
+    ['alters the status', "task => ({ ...task, status: 'backlog' })", 'status', true],
+  ])('a tracker that %s on create fails the filing instead of reporting it', (_case, stores, field, recoverable) => {
     const at = install();
     projectFile(at, 'archon');
     const tracker = fakeTracker([], false, stores);
     runArtifacts(at.outputRoot, RUN, { verdict: [record('new')] });
-    const { outcome } = decide(at, pass('pass-1', tracker), fileIt('new-defect'));
+    const { facts, outcome } = decide(at, pass('pass-1', tracker), fileIt('new-defect'));
 
     expect(outcome.code).toBe(1);
-    expect(outcome.stderr).toContain(`the tracker created task task-1 but reads back a different ${field}`);
+    expect(outcome.stderr).toContain(
+      `the tracker created task task-1 but reads back a different ${field} than was sent, so it is not reported as filed`
+    );
     expect(outcome.stdout).toBe('');
     expect(tracker.read().requests.map(request => request.method)).toEqual(['GET', 'GET', 'POST', 'GET']);
     expect([outcome.createdIssues, issueCreates(outcome)]).toEqual([[], []]);
     expect(state(at, `discoveries/runs/${RUN}`)).toMatchObject({ claim: { run_id: 'pass-1' } });
+
+    // As the refusal says: a task whose header survived is recovered as filed by the next try.
+    const again = outcomeAfter(at, pass('pass-1', tracker), facts, fileIt('new-defect'));
+    expect(again.code === 0).toBe(recoverable);
+    if (recoverable) {
+      expect(ok(again).written).toEqual([{ key: 'new-defect', outcome: 'file', url: `${TRACKER}/api/tasks/task-1` }]);
+      expect(tracker.read().requests.filter(request => request.method === 'POST')).toHaveLength(1);
+    }
   }, 60_000);
 
   test('refuses before any write a brief holding discovery metadata, which would leave its task unreadable', () => {

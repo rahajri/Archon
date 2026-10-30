@@ -182,16 +182,19 @@ nothing acts on it yet.
 
 [`.shared/archon-tracker.ts`](.shared/archon-tracker.ts) lists the project's tasks,
 archived ones included, and creates tasks in it with the context's `archon_project_id`
-as their `project_id`. A created task is read back, and one whose project, title,
-description or status differs from what was sent is refused rather than reported as
-filed. It reaches the tracker at `ARCHON_TRACKER_BASE_URL`, set in the environment
+as their `project_id`. A created task is read back, and one that differs in any field
+sent (its project, title, description or status) is refused rather than reported as
+filed. The refusal names the task: a later pass recovers it as filed if its
+archon-discovery header survived and it is in the project, so check it before running
+again. It reaches the tracker at `ARCHON_TRACKER_BASE_URL`, set in the environment
 Archon runs with, for example `ARCHON_TRACKER_BASE_URL=http://127.0.0.1:8181` in
 `~/.archon/.env`. There is no default. A value with credentials (userinfo), a query or
 a fragment is refused, and no refusal quotes the value or any part of it, since it may
 hold a secret. An accepted value carries none of those, so diagnostics may show what is
 built on it, and only that: task URLs in the outcome, the origin of a tracker that is
-unreachable, and the method and path of a request that fails, with its status and the
-start of the tracker's response.
+unreachable, and the method and path of a request that fails. Besides those, a failed
+request shows its status and the start of the tracker's response, and JSON in a
+successful response that should be a task and is not shows its start.
 
 Only a checkout with no `.factory/project.yaml`, or whose `tracker.primary` is
 `github`, declares no tracker and keeps filing on GitHub. Every other state is refused

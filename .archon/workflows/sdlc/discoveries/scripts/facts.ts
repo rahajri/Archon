@@ -24,6 +24,7 @@ import type { QualifiedPr } from '../../.shared/forge.ts';
 import {
   type FilingTarget,
   filedDiscoveries,
+  filingTargetOf,
   parseRunDocument,
   type Queue,
   type QueuedRun,
@@ -123,7 +124,7 @@ function claimUndecided<R extends { ref: string }>(
  */
 async function filingTarget(repo: QualifiedPr['repo']): Promise<FilingTarget> {
   const tracker = declaredArchonTracker(process.cwd(), repo, process.env.ARCHON_TRACKER_BASE_URL);
-  if (tracker === null) return { tracker: 'github', archon_project_id: '' };
+  if (tracker === null) return filingTargetOf(null);
   const tasks = filedDiscoveries(await tracker.listProjectTasks()).map(({ key, refs, task }) => ({
     key,
     refs,
@@ -136,7 +137,7 @@ async function filingTarget(repo: QualifiedPr['repo']): Promise<FilingTarget> {
   const drain = join(artifactsDir(), 'drain');
   mkdirSync(drain, { recursive: true });
   writeFileSync(join(drain, 'tasks.json'), `${JSON.stringify(tasks, null, 2)}\n`);
-  return { tracker: 'archon', archon_project_id: tracker.context.archonProjectId };
+  return filingTargetOf(tracker);
 }
 
 async function main(): Promise<void> {

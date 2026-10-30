@@ -106,10 +106,10 @@ export class ArchonTracker {
   ) {}
 
   /**
-   * Create a task in the project and return its id, once the tracker reads it back with
-   * the project, title, description and status sent. A later pass recovers the task only
-   * by the metadata in its description, so a task stored any other way is refused, not
-   * reported as filed.
+   * Create a task in the project and return its id, once the tracker reads back every
+   * field of the request as it was sent. A task stored any other way is refused, not
+   * reported as filed: what a later pass makes of it depends on what survived, since it
+   * recovers a task by the archon-discovery header in its description, in this project.
    */
   async createTask(task: NewArchonTask): Promise<string> {
     const sent = { ...task, project_id: this.context.archonProjectId };
@@ -118,11 +118,15 @@ export class ArchonTracker {
     if (!isObject(created) || typeof created.id !== 'string') {
       throw new ArchonTrackerError(`the tracker's create response is not a task: ${JSON.stringify(body).slice(0, 500)}`, null);
     }
-    const stored = taskOf(await this.request('GET', new URL(this.taskUrl(created.id))));
-    const altered = (['project_id', 'title', 'description', 'status'] as const).filter(field => stored[field] !== sent[field]);
+    const stored = await this.request('GET', new URL(this.taskUrl(created.id)));
+    if (!isObject(stored)) {
+      const excerpt = JSON.stringify(stored).slice(0, 500);
+      throw new ArchonTrackerError(`the tracker reads back task ${created.id} as something that is not a task: ${excerpt}`, null);
+    }
+    const altered = Object.entries(sent).flatMap(([field, value]) => (stored[field] === value ? [] : [field]));
     if (altered.length > 0) {
       throw new ArchonTrackerError(
-        `the tracker created task ${created.id} but reads back a different ${altered.join(', ')}; a later pass could not recover it, so fix or remove it before running again.`,
+        `the tracker created task ${created.id} but reads back a different ${altered.join(', ')} than was sent, so it is not reported as filed. Check it before running again: a later pass recovers it as filed if its archon-discovery header is intact and it is in project ${this.context.archonProjectId}.`,
         null
       );
     }
