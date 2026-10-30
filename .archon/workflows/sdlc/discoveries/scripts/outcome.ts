@@ -20,12 +20,13 @@
 
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { declaredArchonTracker } from '../../.shared/archon-tracker.ts';
+import { declaredArchonTracker, type NewArchonTask } from '../../.shared/archon-tracker.ts';
 import {
   type AgentDecision,
   checkDecisions,
   discoveryMarker,
   discoveryRefsLine,
+  type FiledDiscovery,
   filedDiscoveries,
   filingsOf,
   parseRunDocument,
@@ -34,7 +35,7 @@ import {
   refRun,
   runName,
 } from '../../.shared/discoveries.ts';
-import { forgeSource, sameRepo } from '../../.shared/forge.ts';
+import { forgeSource, type QualifiedPr, sameRepo } from '../../.shared/forge.ts';
 import { artifactsDir, emit, nullableJson, refuse, text, trimmed } from '../../.shared/io.ts';
 import { createIssue, viewIssue } from '../../.shared/issue.ts';
 import { upsertComment } from '../../.shared/pr.ts';
@@ -62,6 +63,43 @@ function filingBody(decision: AgentDecision & { outcome: 'file' }, sha: string, 
   ].join('\n');
 }
 
+function newTask(decision: AgentDecision & { outcome: 'file' }, sha: string): NewArchonTask {
+  return { title: decision.title, description: filingBody(decision, sha, true), status: 'todo' };
+}
+
+/**
+ * The tracker task each filing recovers instead of creating one, by key: the task that
+ * carries its key's marker or any of its refs. A filing two tasks match is a problem.
+ */
+function recoveredTasks(filed: readonly FiledDiscovery[], decisions: readonly AgentDecision[], problems: string[]): Map<string, string> {
+  const recovered = new Map<string, string>();
+  for (const decision of decisions) {
+    if (decision.outcome !== 'file') continue;
+    const tasks = filingsOf(filed, decision);
+    if (tasks.length > 1) {
+      const ids = tasks.map(entry => entry.task.id).join(', ');
+      problems.push(`key ${decision.key} and its refs match more than one tracker task (${ids})`);
+    } else if (tasks[0] !== undefined) {
+      recovered.set(decision.key, tasks[0].task.id);
+    }
+  }
+  return recovered;
+}
+
+/** Why a GitHub issue cannot track the decision, or null when it can: it must be open in this repository. */
+function trackingProblem(decision: AgentDecision & { outcome: 'track' }, repo: QualifiedPr['repo']): string | null {
+  if (!sameRepo(decision.issue.repo, repo)) {
+    return `key ${decision.key} is tracked by an issue outside ${repo.host}/${repo.path}`;
+  }
+  try {
+    return viewIssue(decision.issue).state === 'open'
+      ? null
+      : `key ${decision.key} is tracked by ${issueUrl(decision.issue)}, which is not open`;
+  } catch (error) {
+    return `key ${decision.key}: ${error instanceof Error ? error.message : String(error)}`;
+  }
+}
+
 async function main(): Promise<void> {
   const idle = trimmed(process.env.INPUTS_PATH) === 'idle';
   if (idle) {
@@ -82,34 +120,14 @@ async function main(): Promise<void> {
     queue.runs.flatMap(run => run.records.map(record => record.ref)),
     decisions
   );
-  // The task each filing recovers instead of creating one, when the project files into the tracker.
-  const recovered = new Map<string, string>();
+  const recovered = tracker === null ? new Map<string, string>() : recoveredTasks(filed, decisions, problems);
   for (const decision of decisions) {
-    if (tracker !== null && decision.outcome === 'file') {
-      const tasks = filingsOf(filed, decision);
-      if (tasks.length > 1) {
-        const ids = tasks.map(entry => entry.task.id).join(', ');
-        problems.push(`key ${decision.key} and its refs match more than one tracker task (${ids})`);
-      } else if (tasks[0] !== undefined) {
-        recovered.set(decision.key, tasks[0].task.id);
-      }
-    }
     if (decision.outcome !== 'track') continue;
-    if (tracker !== null) {
-      problems.push(`key ${decision.key} is tracked on a GitHub issue, but this project files discoveries into the Archon tracker`);
-      continue;
-    }
-    if (!sameRepo(decision.issue.repo, repo)) {
-      problems.push(`key ${decision.key} is tracked by an issue outside ${repo.host}/${repo.path}`);
-      continue;
-    }
-    try {
-      if (viewIssue(decision.issue).state !== 'open') {
-        problems.push(`key ${decision.key} is tracked by ${issueUrl(decision.issue)}, which is not open`);
-      }
-    } catch (error) {
-      problems.push(`key ${decision.key}: ${error instanceof Error ? error.message : String(error)}`);
-    }
+    const problem =
+      tracker === null
+        ? trackingProblem(decision, repo)
+        : `key ${decision.key} is tracked on a GitHub issue, but this project files discoveries into the Archon tracker`;
+    if (problem !== null) problems.push(problem);
   }
   const dropped = decisions.flatMap(decision =>
     decision.outcome === 'drop' ? [{ key: decision.key, reason: decision.reason }] : []
@@ -131,10 +149,7 @@ async function main(): Promise<void> {
       const url =
         tracker === null
           ? createIssue(repo, decision.title, filingBody(decision, sha, false), marker).url
-          : tracker.taskUrl(
-              recovered.get(decision.key) ??
-                (await tracker.createTask({ title: decision.title, description: filingBody(decision, sha, true), status: 'todo' }))
-            );
+          : tracker.taskUrl(recovered.get(decision.key) ?? (await tracker.createTask(newTask(decision, sha))));
       written.push({ key: decision.key, outcome: 'file', url });
     } else if (decision.outcome === 'track') {
       const comment = decision.comment?.trim() || null;

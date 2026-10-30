@@ -325,36 +325,54 @@ function resolveRef(schema: Schema): Schema {
   return typeof ref === 'string' ? (contract.components.schemas[ref.replace('#/components/schemas/', '')] ?? {}) : schema;
 }
 
+const SCALARS: Record<string, (value: unknown) => boolean> = {
+  string: value => typeof value === 'string',
+  boolean: value => typeof value === 'boolean',
+  integer: value => Number.isInteger(value),
+  null: value => value === null,
+};
+
 /** Why `value` does not satisfy `schema`, for the JSON types this contract uses; null when it does. */
 function mismatch(value: unknown, schema: Schema, at: string): string | null {
   const resolved = resolveRef(schema);
   if (Array.isArray(resolved.anyOf)) {
     return (resolved.anyOf as Schema[]).some(branch => mismatch(value, branch, at) === null) ? null : `${at} matches no anyOf branch`;
   }
-  switch (resolved.type) {
-    case 'string':
-      return typeof value === 'string' ? null : `${at} is not a string`;
-    case 'boolean':
-      return typeof value === 'boolean' ? null : `${at} is not a boolean`;
-    case 'integer':
-      return Number.isInteger(value) ? null : `${at} is not an integer`;
-    case 'null':
-      return value === null ? null : `${at} is not null`;
-    case 'object': {
-      if (!isObject(value)) return `${at} is not an object`;
-      const properties = (resolved.properties ?? {}) as Record<string, Schema>;
-      for (const key of (resolved.required ?? []) as string[]) if (!(key in value)) return `${at}.${key} is required`;
-      for (const [key, field] of Object.entries(value)) {
-        const declared = properties[key];
-        if (declared === undefined) return `${at}.${key} is not in the contract`;
-        const problem = mismatch(field, declared, `${at}.${key}`);
-        if (problem !== null) return problem;
-      }
-      return null;
-    }
-    default:
-      return `${at} has a type this check does not know: ${JSON.stringify(resolved.type)}`;
+  if (resolved.type === 'object') return objectMismatch(value, resolved, at);
+  const check = typeof resolved.type === 'string' ? SCALARS[resolved.type] : undefined;
+  if (check === undefined) return `${at} has a type this check does not know: ${JSON.stringify(resolved.type)}`;
+  return check(value) ? null : `${at} is not ${resolved.type === 'integer' ? 'an' : 'a'} ${String(resolved.type)}`;
+}
+
+function objectMismatch(value: unknown, schema: Schema, at: string): string | null {
+  if (!isObject(value)) return `${at} is not an object`;
+  const properties = (schema.properties ?? {}) as Record<string, Schema>;
+  const missing = ((schema.required ?? []) as string[]).find(key => !(key in value));
+  if (missing !== undefined) return `${at}.${missing} is required`;
+  for (const [key, field] of Object.entries(value)) {
+    const declared = properties[key];
+    const problem = declared === undefined ? `${at}.${key} is not in the contract` : mismatch(field, declared, `${at}.${key}`);
+    if (problem !== null) return problem;
   }
+  return null;
+}
+
+type Operation = (typeof contract.paths)[string][string];
+
+function queryProblems(url: URL, operation: Operation): string[] {
+  return [...url.searchParams].flatMap(([name, raw]) => {
+    const parameter = operation.parameters.find(entry => entry.in === 'query' && entry.name === name);
+    if (parameter === undefined) return [`query ${name} is not in the contract`];
+    const value = raw === 'true' ? true : raw === 'false' ? false : /^-?\d+$/.test(raw) ? Number(raw) : raw;
+    return [mismatch(value, parameter.schema as Schema, `query ${name}`)].filter(problem => problem !== null);
+  });
+}
+
+function bodyProblems(body: unknown, operation: Operation): string[] {
+  const content = (operation.requestBody?.content as Record<string, { schema: Schema }> | undefined)?.['application/json'];
+  if (body === undefined) return operation.requestBody?.required === true ? ['the required body is missing'] : [];
+  if (content === undefined) return ['the operation takes no JSON body'];
+  return [mismatch(body, content.schema, 'body')].filter(problem => problem !== null);
 }
 
 /** Every way a sent request leaves the captured contract. */
@@ -366,27 +384,7 @@ function contractProblems(request: Sent): string[] {
   );
   const operation = template === undefined ? undefined : contract.paths[template]?.[request.method.toLowerCase()];
   if (operation === undefined) return [`${request.method} ${path} is not in the contract`];
-  const problems: string[] = [];
-  for (const [name, raw] of url.searchParams) {
-    const parameter = operation.parameters.find(entry => entry.in === 'query' && entry.name === name);
-    if (parameter === undefined) {
-      problems.push(`query ${name} is not in the contract`);
-      continue;
-    }
-    const value = raw === 'true' ? true : raw === 'false' ? false : /^-?\d+$/.test(raw) ? Number(raw) : raw;
-    const problem = mismatch(value, parameter.schema as Schema, `query ${name}`);
-    if (problem !== null) problems.push(problem);
-  }
-  const content = (operation.requestBody?.content as Record<string, { schema: Schema }> | undefined)?.['application/json'];
-  if (request.body === undefined) {
-    if (operation.requestBody?.required === true) problems.push('the required body is missing');
-  } else if (content === undefined) {
-    problems.push('the operation takes no JSON body');
-  } else {
-    const problem = mismatch(request.body, content.schema, 'body');
-    if (problem !== null) problems.push(problem);
-  }
-  return problems;
+  return [...queryProblems(url, operation), ...bodyProblems(request.body, operation)];
 }
 
 describe("the tracker's contract", () => {

@@ -19,7 +19,7 @@
 
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { declaredArchonTracker } from '../../.shared/archon-tracker.ts';
+import { type ArchonTracker, declaredArchonTracker } from '../../.shared/archon-tracker.ts';
 import {
   filedDiscoveries,
   parseRunDocument,
@@ -115,6 +115,19 @@ function claimUndecided<R extends { ref: string }>(
   return records.length === 0 ? null : { records, questions: document.questions ?? [] };
 }
 
+/** The tasks earlier passes filed in the project, as the agent reads them. */
+async function filedTasks(tracker: ArchonTracker) {
+  return filedDiscoveries(await tracker.listProjectTasks()).map(({ key, refs, task }) => ({
+    key,
+    refs,
+    url: tracker.taskUrl(task.id),
+    title: task.title,
+    status: task.status,
+    archived: task.archived,
+    description: task.description,
+  }));
+}
+
 async function main(): Promise<void> {
   // Every input is validated before anything is read or written.
   const since = parseTime('since', trimmed(process.env.INPUTS_SINCE));
@@ -130,18 +143,7 @@ async function main(): Promise<void> {
   if (self === '') throw new Error('WORKFLOW_ID is not set; the engine supplies it to every exec node');
 
   const tracker = declaredArchonTracker(process.cwd(), repo, process.env.ARCHON_TRACKER_BASE_URL);
-  const filed =
-    tracker === null
-      ? null
-      : filedDiscoveries(await tracker.listProjectTasks()).map(({ key, refs, task }) => ({
-          key,
-          refs,
-          url: tracker.taskUrl(task.id),
-          title: task.title,
-          status: task.status,
-          archived: task.archived,
-          description: task.description,
-        }));
+  const filed = tracker === null ? null : await filedTasks(tracker);
 
   const base = fetchDefaultBranch(repo);
   const documents = readRunDocuments();
