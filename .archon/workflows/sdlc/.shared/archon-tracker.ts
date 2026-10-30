@@ -47,10 +47,11 @@ export class ArchonTrackerError extends Error {
 
 /**
  * The tracker's base URL from its configured value (`ARCHON_TRACKER_BASE_URL`).
- * There is no default: an unset or malformed value is refused rather than guessed. The
- * value may hold a secret, so no message repeats it, and a value carrying credentials,
- * a query or a fragment is refused: the tracker takes none, and every task URL this
- * pack prints is built on the base.
+ * There is no default: an unset or malformed value is refused rather than guessed. A
+ * value carrying credentials (userinfo), a query or a fragment is refused, and no refusal
+ * here quotes the value, which may hold a secret. An accepted base therefore carries
+ * none of those, so the request diagnostics may name its origin and path, as every task
+ * URL this pack prints does.
  */
 export function trackerBaseUrl(value: string | undefined): URL {
   const raw = (value ?? '').trim();

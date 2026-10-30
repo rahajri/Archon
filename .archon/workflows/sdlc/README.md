@@ -184,9 +184,10 @@ nothing acts on it yet.
 archived ones included, and creates tasks in it with the context's `archon_project_id`
 as their `project_id`. It reaches the tracker at `ARCHON_TRACKER_BASE_URL`, set in the
 environment Archon runs with, for example `ARCHON_TRACKER_BASE_URL=http://127.0.0.1:8181`
-in `~/.archon/.env`. There is no default, and the value carries no credentials, query
-or fragment: the tracker takes none, and every task URL the pack prints is built on it.
-No message repeats the value.
+in `~/.archon/.env`. There is no default. A value with credentials (userinfo), a query
+or a fragment is refused, and no refusal quotes a value it rejects, since that value may
+hold a secret. An accepted value carries none of those, so the pack prints task URLs
+built on it, and a failed request names the tracker's origin and the request's path.
 
 Only a checkout with no `.factory/project.yaml`, or whose `tracker.primary` is
 `github`, declares no tracker and keeps filing on GitHub. Every other state is refused
@@ -879,11 +880,14 @@ terminal report lists.
   lists the project's tasks, archived ones included, and a filing recovers the task that
   carries its key's marker or any of its refs instead of creating one, so a pass run
   again after a stop recovers its task whatever key the agent gives it the second time.
-  A filing that matches two tasks refuses the pass. A defect a different run finds again
+  A filing that matches two tasks refuses the pass, and so does a task whose marker or
+  refs line is corrupt, rather than reading it as no match. A defect a different run finds again
   has different refs; finding its task is the agent's judgment, made from
   `drain/tasks.json`, and it reuses that task's key. A tracker that is misconfigured or
   fails refuses the pass, in `facts` before any run is claimed, rather than filing on
-  GitHub.
+  GitHub. `facts` carries the target it chose, GitHub or one tracker project, to the
+  outcome, which files there, a resumed outcome too, and refuses before any write when
+  the checkout's project no longer declares that target.
 - **Questions.** Every `ask` in a pass becomes one attention item labelled
   `discoveries: question`. The answer is stored on the asking run's document. The runs
   those records came from stay claimed by the asking run until it ends, so no other
