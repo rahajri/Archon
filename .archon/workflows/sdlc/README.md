@@ -189,7 +189,7 @@ archon-discovery header survived and it is in the project, so check it before ru
 again. It reaches the tracker at `ARCHON_TRACKER_BASE_URL`, set in the environment
 Archon runs with, for example `ARCHON_TRACKER_BASE_URL=http://127.0.0.1:8181` in
 `~/.archon/.env`. There is no default. A value with credentials (userinfo), a query or
-a fragment is refused, and no refusal quotes the value or any part of it, since it may
+a fragment, even an empty `?` or `#`, is refused, and no refusal quotes the value or any part of it, since it may
 hold a secret. An accepted value carries none of those, so diagnostics may show it and
 what is built on it, and only that: the normalized value itself, which the discoveries
 workflow carries from `facts` to its outcome and names when a resumed outcome finds it

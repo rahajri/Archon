@@ -184,6 +184,8 @@ describe("a drained run's document", () => {
     ['an Archon target whose base URL is not normalized', { ...ARCHON_FIELDS, tracker_base_url: 'http://127.0.0.1:8181' }],
     ['an Archon target whose base URL carries credentials', { ...ARCHON_FIELDS, tracker_base_url: 'http://user:S3CRET@127.0.0.1:8181/' }],
     ['an Archon target whose base URL carries a query', { ...ARCHON_FIELDS, tracker_base_url: 'http://127.0.0.1:8181/?token=S3CRET' }],
+    ['an Archon target whose base URL ends in an empty query', { ...ARCHON_FIELDS, tracker_base_url: 'http://127.0.0.1:8181/?' }],
+    ['an Archon target whose base URL ends in an empty fragment', { ...ARCHON_FIELDS, tracker_base_url: 'http://127.0.0.1:8181/#' }],
     ['a GitHub target that names a tracker base URL', { ...GITHUB_FIELDS, tracker_base_url: 'http://127.0.0.1:8181/' }],
   ])('refuses %s, without quoting the URL', (_case, fields) => {
     expect(() => parseFilingTarget(fields)).toThrow('is not a filing target');

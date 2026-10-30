@@ -163,6 +163,17 @@ describe('trackerBaseUrl', () => {
     expect(trackerBaseUrl('https://tracker.example/archon').href).toBe('https://tracker.example/archon/');
   });
 
+  test.each([[BASE], [`${BASE}/`], [` ${BASE}/ `], [`\t${BASE}\n`]])('normalizes %p to the one base it names', value => {
+    expect(trackerBaseUrl(value).href).toBe(`${BASE}/`);
+  });
+
+  test.each([[`${BASE}?`], [`${BASE}#`], [`${BASE}/?`], [`${BASE}/#`], [`${BASE}?#`]])(
+    'refuses %p, whose empty delimiter would name the same tracker as another target',
+    value => {
+      expect(() => trackerBaseUrl(value)).toThrow('must not carry credentials, a query or a fragment');
+    }
+  );
+
   test.each([[undefined], [''], ['127.0.0.1:8181'], ['not a url'], ['ftp://tracker.example']])(
     'refuses %p',
     value => {
@@ -177,6 +188,8 @@ describe('trackerBaseUrl', () => {
     ['a token in the user part', 'https://S3CRET@tracker.example'],
     ['a query secret', 'http://tracker.example/?token=S3CRET'],
     ['a fragment', 'http://tracker.example/#S3CRET'],
+    ['a query with no path', 'http://tracker.example?S3CRET'],
+    ['a fragment with no path', 'http://tracker.example#S3CRET'],
   ])('refuses %s without repeating the value', (_case, value) => {
     let caught: unknown;
     try {
@@ -230,6 +243,7 @@ describe('declaredArchonTracker', () => {
     ['a malformed archon_project_id', ARCHON_PROJECT.replace(PROJECT_ID, 'BAREA'), BASE, /archon_project_id/],
     ['no base URL', ARCHON_PROJECT, undefined, /is not set/],
     ['a malformed base URL', ARCHON_PROJECT, 'tracker', /is not a URL/],
+    ['a base URL ending in an empty query', ARCHON_PROJECT, `${BASE}?`, /must not carry/],
   ])('refuses %s before sending anything', (_case, yaml, base, why) => {
     const { fetch, sent } = fakeFetch();
     expect(() => declaredArchonTracker(checkout(yaml), BAREA, base, fetch)).toThrow(why);

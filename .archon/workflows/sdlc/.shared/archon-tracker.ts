@@ -48,10 +48,11 @@ export class ArchonTrackerError extends Error {
 /**
  * The tracker's base URL from its configured value (`ARCHON_TRACKER_BASE_URL`).
  * There is no default: an unset or malformed value is refused rather than guessed. A
- * value carrying credentials (userinfo), a query or a fragment is refused, and no refusal
- * here quotes the value, which may hold a secret. An accepted base therefore carries
- * none of those, so it and what is built on it may be printed: task URLs, the origin of a
- * tracker that is unreachable, and the method and path of a request that fails.
+ * value carrying credentials (userinfo), a query or a fragment, even an empty one, is
+ * refused, and no refusal here quotes the value, which may hold a secret. An accepted
+ * base therefore carries none of those, so it and what is built on it may be printed:
+ * task URLs, the origin of a tracker that is unreachable, and the method and path of a
+ * request that fails.
  */
 export function trackerBaseUrl(value: string | undefined): URL {
   const raw = (value ?? '').trim();
@@ -66,7 +67,9 @@ export function trackerBaseUrl(value: string | undefined): URL {
   if (url.protocol !== 'http:' && url.protocol !== 'https:') {
     throw new ArchonTrackerError('ARCHON_TRACKER_BASE_URL must be an http or https URL.', null);
   }
-  if (url.username !== '' || url.password !== '' || url.search !== '' || url.hash !== '') {
+  // The parsed URL keeps an empty `?` or `#` in its href, so a base ending in one would
+  // name the same tracker as the plain base yet carry a different filing target.
+  if (url.username !== '' || url.password !== '' || raw.includes('?') || raw.includes('#')) {
     throw new ArchonTrackerError('ARCHON_TRACKER_BASE_URL must not carry credentials, a query or a fragment.', null);
   }
   if (!url.pathname.endsWith('/')) url.pathname = `${url.pathname}/`;
