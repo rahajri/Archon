@@ -87,11 +87,11 @@ The stage after the build queue, started by a schedule binding. Each run claims 
 
 #### `archon-discoveries`
 
-Drains the discoveries finished runs recorded outside their own scope. One agent verifies each one against the default branch, merges duplicates across runs and with earlier decisions, and decides: file an issue with a full brief, track it on the open issue that already covers it, drop it with a reason, or ask a maintainer. Scripts perform only the writes it declared.
+Drains the discoveries finished runs recorded outside their own scope. One agent verifies each one against the default branch, merges duplicates across runs and with earlier decisions, and decides: file an issue with a full brief, track it on the open issue that already covers it, drop it with a reason, or ask a maintainer. A repository whose `.factory/project.yaml` names the Archon task tracker as primary files a `todo` task in its tracker project instead of an issue, and tracks nothing on GitHub. Scripts perform only the writes it declared.
 
 **When to use it**: Runs keep finding defects outside their change and nobody reads their `discoveries.md`. [Set up the SDLC factory](/getting-started/sdlc-factory/) runs it by hand and binds it.
 
-**What it produces**: Filed issues and evidence comments, and one state document per drained run (`archon state list --prefix discoveries/runs/`) recording which of its records were decided and any question asked with its answer, so a record is decided once.
+**What it produces**: Filed issues and evidence comments, or tasks in the Archon tracker project for a tracker-primary repository, and one state document per drained run (`archon state list --prefix discoveries/runs/`) recording which of its records were decided and any question asked with its answer, so a record is decided once.
 
 #### `archon-worktree-cleanup`
 
