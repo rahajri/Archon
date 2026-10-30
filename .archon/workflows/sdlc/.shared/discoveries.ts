@@ -8,10 +8,13 @@
  * a pass works it, and while one of its questions waits.
  *
  * There is no store of decisions across runs. A defect a later run finds again is judged
- * again, against the tracker: a filed issue carries the key's marker, so filing the same
- * key twice recovers the issue instead of opening another.
+ * again, against the tracker: a filed issue or task carries the key's marker, so filing
+ * the same key twice recovers it instead of opening another. A task also records the refs
+ * it was filed for, so a pass that decides those refs again recovers it whatever key the
+ * agent gives it this time.
  */
 
+import type { ArchonTask } from './archon-tracker.ts';
 import type { QualifiedPr } from './forge.ts';
 import type { fetchDefaultBranch } from './remote.ts';
 import type { DiscoveryRecord } from './report.ts';
@@ -172,8 +175,56 @@ export function checkDecisions(queued: readonly string[], decisions: readonly Ag
   return problems;
 }
 
-/** The marker on a filed issue's first line, and on an evidence comment's. */
+const MARKER_OPEN = '<!-- archon-discovery ';
+const REFS_OPEN = '<!-- archon-discovery-refs ';
+const COMMENT_CLOSE = ' -->';
+
+/** The marker on a filed issue's or task's first line, and on an evidence comment's. */
 export function discoveryMarker(key: string): string {
   if (!isKey(key)) throw new Error(`"${key}" is not a decision key`);
-  return `<!-- archon-discovery ${key} -->`;
+  return `${MARKER_OPEN}${key}${COMMENT_CLOSE}`;
+}
+
+/** The line after a filed task's marker: the queued refs it was filed for. `>` is escaped so no ref closes the comment. */
+export function discoveryRefsLine(refs: readonly string[]): string {
+  return `${REFS_OPEN}${JSON.stringify(refs).replaceAll('>', '\\u003e')}${COMMENT_CLOSE}`;
+}
+
+/** A tracker task this workflow filed: its marker's key and the refs it was filed for. */
+export interface FiledDiscovery {
+  readonly key: string;
+  /** Empty for a task filed before tasks recorded their refs. */
+  readonly refs: readonly string[];
+  readonly task: ArchonTask;
+}
+
+function between(line: string, open: string): string | undefined {
+  return line.startsWith(open) && line.endsWith(COMMENT_CLOSE) ? line.slice(open.length, -COMMENT_CLOSE.length) : undefined;
+}
+
+/** The tasks a discoveries pass filed, by the marker on their description's first line. */
+export function filedDiscoveries(tasks: readonly ArchonTask[]): FiledDiscovery[] {
+  return tasks.flatMap(task => {
+    const [first = '', second = ''] = (task.description ?? '').split(/\r?\n/, 2);
+    const key = between(first, MARKER_OPEN);
+    if (key === undefined || !isKey(key)) return [];
+    const refs = between(second, REFS_OPEN);
+    if (refs === undefined) return [{ key, refs: [], task }];
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(refs);
+    } catch {
+      parsed = undefined;
+    }
+    if (!strings(parsed)) throw new Error(`task ${task.id} carries a discovery refs line that is not a list of refs`);
+    return [{ key, refs: parsed, task }];
+  });
+}
+
+/**
+ * The filed tasks a `file` decision is: the one carrying its key's marker, and any filed
+ * for one of its refs. More than one is a conflict for the caller to refuse.
+ */
+export function filingsOf(filed: readonly FiledDiscovery[], decision: { key: string; refs: readonly string[] }): FiledDiscovery[] {
+  return filed.filter(entry => entry.key === decision.key || entry.refs.some(ref => decision.refs.includes(ref)));
 }

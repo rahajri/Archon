@@ -7,10 +7,11 @@
  * comment is upserted by the same marker, so a pass that stops anywhere and is run
  * again never files or comments twice. A checkout whose `.factory/project.yaml` names
  * the Archon tracker as primary files each discovery as a task in that project instead,
- * recovered by the same marker; it never falls back to an issue. Last, each run's
- * document records the refs this pass decided and the questions it asked, and its claim
- * is released, except on a run with an asked record: it stays claimed by this run until
- * the question is answered and the run ends.
+ * recovered by its key's marker or by any of its refs, archived tasks included; it never
+ * falls back to an issue, and refuses a `track`, which would write to GitHub. Last, each
+ * run's document records the refs this pass decided and the questions it asked, and its
+ * claim is released, except on a run with an asked record: it stays claimed by this run
+ * until the question is answered and the run ends.
  *
  * Bound inputs: INPUTS_PATH from facts; INPUTS_DECISIONS and INPUTS_SUMMARY from the
  * agent, `null` when it did not run; the workflow's INPUTS_REPO_HOST and
@@ -19,18 +20,21 @@
 
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { type ArchonTracker, declaredArchonTracker } from '../../.shared/archon-tracker.ts';
+import { declaredArchonTracker } from '../../.shared/archon-tracker.ts';
 import {
   type AgentDecision,
   checkDecisions,
   discoveryMarker,
+  discoveryRefsLine,
+  filedDiscoveries,
+  filingsOf,
   parseRunDocument,
   type Question,
   type Queue,
   refRun,
   runName,
 } from '../../.shared/discoveries.ts';
-import { forgeSource, type QualifiedPr, sameRepo } from '../../.shared/forge.ts';
+import { forgeSource, sameRepo } from '../../.shared/forge.ts';
 import { artifactsDir, emit, nullableJson, refuse, text, trimmed } from '../../.shared/io.ts';
 import { createIssue, viewIssue } from '../../.shared/issue.ts';
 import { upsertComment } from '../../.shared/pr.ts';
@@ -42,29 +46,20 @@ function issueUrl(issue: { repo: { host: string; path: string }; number: number 
   return `https://${issue.repo.host}/${issue.repo.path}/issues/${String(issue.number)}`;
 }
 
-/** The body a filed issue carries: the marker, the agent's brief, then where it came from. */
-function issueBody(decision: AgentDecision & { outcome: 'file' }, sha: string): string {
+/**
+ * The body a filing carries: the marker, the refs it was filed for when it is a tracker
+ * task, the agent's brief, then where it came from.
+ */
+function filingBody(decision: AgentDecision & { outcome: 'file' }, sha: string, task: boolean): string {
   const runs = [...new Set(decision.refs.map(refRun))];
   return [
     discoveryMarker(decision.key),
+    ...(task ? [discoveryRefsLine(decision.refs)] : []),
     decision.body.trim(),
     '',
     '---',
     `Found by Archon run${runs.length === 1 ? '' : 's'} ${runs.join(', ')} and verified at ${sha} by the archon-discoveries workflow.`,
   ].join('\n');
-}
-
-/** File one discovery where the project keeps its work, and return where it is. */
-async function fileDiscovery(
-  tracker: ArchonTracker | null,
-  repo: QualifiedPr['repo'],
-  title: string,
-  body: string,
-  marker: string
-): Promise<string> {
-  if (tracker === null) return createIssue(repo, title, body, marker).url;
-  const task = await tracker.createMarkedTask(marker, { title, description: body, status: 'todo' });
-  return tracker.taskUrl(task.id);
 }
 
 async function main(): Promise<void> {
@@ -80,14 +75,30 @@ async function main(): Promise<void> {
   const queue = JSON.parse(readFileSync(join(artifactsDir(), 'drain', 'queue.json'), 'utf8')) as Queue;
   const decisions = (nullableJson(process.env.INPUTS_DECISIONS) ?? []) as AgentDecision[];
   const summary = text(process.env.INPUTS_SUMMARY);
-  const tracker = declaredArchonTracker(process.cwd(), process.env.ARCHON_TRACKER_BASE_URL);
+  const tracker = declaredArchonTracker(process.cwd(), repo, process.env.ARCHON_TRACKER_BASE_URL);
+  const filed = tracker === null ? [] : filedDiscoveries(await tracker.listProjectTasks());
 
   const problems = checkDecisions(
     queue.runs.flatMap(run => run.records.map(record => record.ref)),
     decisions
   );
+  // The task each filing recovers instead of creating one, when the project files into the tracker.
+  const recovered = new Map<string, string>();
   for (const decision of decisions) {
+    if (tracker !== null && decision.outcome === 'file') {
+      const tasks = filingsOf(filed, decision);
+      if (tasks.length > 1) {
+        const ids = tasks.map(entry => entry.task.id).join(', ');
+        problems.push(`key ${decision.key} and its refs match more than one tracker task (${ids})`);
+      } else if (tasks[0] !== undefined) {
+        recovered.set(decision.key, tasks[0].task.id);
+      }
+    }
     if (decision.outcome !== 'track') continue;
+    if (tracker !== null) {
+      problems.push(`key ${decision.key} is tracked on a GitHub issue, but this project files discoveries into the Archon tracker`);
+      continue;
+    }
     if (!sameRepo(decision.issue.repo, repo)) {
       problems.push(`key ${decision.key} is tracked by an issue outside ${repo.host}/${repo.path}`);
       continue;
@@ -109,15 +120,21 @@ async function main(): Promise<void> {
 
   if (problems.length > 0) throw new Error(`nothing was written: ${problems.join('; ')}`);
 
-  // The public writes first. Each is found again by its marker, so a pass run again
-  // after a stop never repeats one.
+  // The public writes first. Each is found again by its marker, and a task by its refs
+  // too, so a pass run again after a stop never repeats one.
   const sha = queue.base.sha;
   const written: { key: string; outcome: 'file' | 'track'; url: string }[] = [];
   const source = forgeSource();
   for (const decision of decisions) {
     const marker = discoveryMarker(decision.key);
     if (decision.outcome === 'file') {
-      const url = await fileDiscovery(tracker, repo, decision.title, issueBody(decision, sha), marker);
+      const url =
+        tracker === null
+          ? createIssue(repo, decision.title, filingBody(decision, sha, false), marker).url
+          : tracker.taskUrl(
+              recovered.get(decision.key) ??
+                (await tracker.createTask({ title: decision.title, description: filingBody(decision, sha, true), status: 'todo' }))
+            );
       written.push({ key: decision.key, outcome: 'file', url });
     } else if (decision.outcome === 'track') {
       const comment = decision.comment?.trim() || null;

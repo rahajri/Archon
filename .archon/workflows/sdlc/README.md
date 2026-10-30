@@ -175,19 +175,34 @@ tracker:
 [`.shared/project-context.ts`](.shared/project-context.ts) reads that file into a
 `ProjectContext`. `archon_project_id` names the project in the tracker; it is not the
 engine's codebase for the checkout, and it is never derived from a repository name.
-`create_github_issue_on_ready` is recorded as project policy; nothing acts on it yet.
+`github_repo` is the repository the file was written for, as `owner/name` on
+github.com or as a remote URL (HTTPS, `git@host:owner/name` or `ssh://`), which reduces
+to the same identity. `create_github_issue_on_ready` is recorded as project policy;
+nothing acts on it yet.
 
-[`.shared/archon-tracker.ts`](.shared/archon-tracker.ts) creates, reads, lists and
-updates tasks in that project, and sends the context's `archon_project_id` as every
-created task's `project_id`. It reaches the tracker at `ARCHON_TRACKER_BASE_URL`, set
-in the environment Archon runs with, for example `ARCHON_TRACKER_BASE_URL=http://127.0.0.1:8181`
-in `~/.archon/.env`. There is no default. A checkout with no project file, or whose
-`tracker.primary` is `github`, declares no tracker. One whose project file is not valid
-YAML or misses a field, or names `archon` with no `archon_project_id` or with an unset
-or non-http(s) base URL, is refused before any request, never read as GitHub.
+[`.shared/archon-tracker.ts`](.shared/archon-tracker.ts) lists the project's tasks,
+archived ones included, and creates tasks in it with the context's `archon_project_id`
+as their `project_id`. It reaches the tracker at `ARCHON_TRACKER_BASE_URL`, set in the
+environment Archon runs with, for example `ARCHON_TRACKER_BASE_URL=http://127.0.0.1:8181`
+in `~/.archon/.env`. There is no default, and the value carries no credentials, query
+or fragment: the tracker takes none, and every task URL the pack prints is built on it.
+No message repeats the value.
+
+Only a checkout with no `.factory/project.yaml`, or whose `tracker.primary` is
+`github`, declares no tracker and keeps filing on GitHub. Every other state is refused
+before any request, never read as GitHub: a `.factory/` or project file that cannot be
+read, a file that is not valid YAML or misses a field, an `archon` tracker with no
+`archon_project_id`, a `github_repo` other than the repository the run works on, or an
+unset or malformed base URL.
+
+The requests are the subset of the tracker's OpenAPI document the pack uses.
+[`archon-tracker-openapi.ts`](../../scripts/archon-tracker-openapi.ts) captures that
+subset into the pack's tests, which hold every request the client sends against it;
+run it with `--check` and `ARCHON_TRACKER_BASE_URL` set to see whether a running
+tracker still matches the capture, and without `--check` to refresh it.
 
 [Discoveries](#discoveries) are the one work item filed there today: a project that
-declares the Archon tracker gets a task where it would otherwise get an issue.
+declares the Archon tracker gets a `todo` task where it would otherwise get an issue.
 
 ## Public writes belong to a script
 
@@ -838,10 +853,13 @@ terminal report lists.
 - **Decisions.** One agent decides every queued record, under the project's direction
   document and the policy files `discoveries.md`, `triage.md` and `rulings.md`. It
   verifies each claim against the default branch's head with `git show` and
-  `git grep`, merges duplicates across runs, and searches the tracker before filing.
-  There is no store of decisions across runs: a defect a later run finds again is
-  judged again against the tracker. Each discovery ends in one decision: `file` an
-  issue with a full brief, `track` it on the open issue that already covers it (with
+  `git grep`, merges duplicates across runs, and searches the tracker before filing:
+  GitHub's issues, or, when the project files into the
+  [Archon task tracker](#archon-task-tracker), the tasks earlier passes filed there,
+  archived ones included, which `facts` lists into `drain/tasks.json`. There is no
+  store of decisions across runs: a defect a later run finds again is judged again
+  against the tracker. Each discovery ends in one decision: `file` an issue (or a
+  task) with a full brief, `track` it on the open issue that already covers it (with
   one marked evidence comment per key, only when it adds something), `drop` it with a
   reason, or `ask` a maintainer.
 - **Writes.** The `outcome` script checks before any write that every queued record is
@@ -849,15 +867,23 @@ terminal report lists.
   writes. A filed issue's body begins with `<!-- archon-discovery <key> -->`, and the
   create looks for that marker across every issue first; the evidence comment carries
   the same marker and is replaced in place. So a pass run again after a stop, or a key
-  filed twice, never opens a second issue or comment. When the checkout's
-  `.factory/project.yaml` names the [Archon task tracker](#archon-task-tracker) as
-  primary, a filing is a `todo` task in that project instead, with the same body as its
-  description, recovered by the same marker across the project's tasks; it opens no
-  issue, and a tracker that is misconfigured or fails refuses the pass rather than
-  filing on GitHub. A `track` still names a GitHub issue. Last it records the decided refs
+  filed twice, never opens a second issue or comment. Last it records the decided refs
   and the questions on each run's document. Filed issues carry no labels: intake
   triages them like any other issue, which it does only when the install's forge
   identity is on `maintainers.json`.
+- **Writes to the Archon tracker.** When the checkout's `.factory/project.yaml` names
+  the Archon tracker as primary, a filing is a `todo` task in that project instead,
+  and the pass opens no issue and posts no comment: a `track` is refused. A task's
+  description begins with the same marker, then `<!-- archon-discovery-refs [...] -->`
+  naming the queued refs it was filed for, then the brief. Before any write the outcome
+  lists the project's tasks, archived ones included, and a filing recovers the task that
+  carries its key's marker or any of its refs instead of creating one, so a pass run
+  again after a stop recovers its task whatever key the agent gives it the second time.
+  A filing that matches two tasks refuses the pass. A defect a different run finds again
+  has different refs; finding its task is the agent's judgment, made from
+  `drain/tasks.json`, and it reuses that task's key. A tracker that is misconfigured or
+  fails refuses the pass, in `facts` before any run is claimed, rather than filing on
+  GitHub.
 - **Questions.** Every `ask` in a pass becomes one attention item labelled
   `discoveries: question`. The answer is stored on the asking run's document. The runs
   those records came from stay claimed by the asking run until it ends, so no other

@@ -6,34 +6,33 @@
  * records on different services, and choosing the Archon tracker never reroutes an
  * issue write. Every request is scoped to the context's `archonProjectId`; the
  * tracker cannot be built without one, so there is no project to fall back to.
+ *
+ * The request shapes here are the subset of the tracker's OpenAPI document this pack
+ * uses; `.archon/scripts/__tests__/archon-tracker.test.ts` holds them against a capture
+ * of that document. Its response bodies are untyped there, so `taskOf` checks the
+ * fields this pack reads.
  */
 
-import { existsSync } from 'node:fs';
-import { join } from 'node:path';
+import { type QualifiedPr, sameRepo } from './forge.ts';
 import { type ArchonProjectContext, PROJECT_FILE, readProjectContext } from './project-context.ts';
 import { isObject } from './typed.ts';
 
-/** The fields of a task this pack reads; the tracker returns more. */
+/** The fields of a listed task this pack reads; the tracker returns more. */
 export interface ArchonTask {
   readonly id: string;
   readonly project_id: string;
   readonly title: string;
   readonly description: string | null;
   readonly status: string;
+  readonly archived: boolean;
 }
 
-/** The writable task fields, as the tracker's `UpdateTaskRequest` names them. */
-export interface ArchonTaskFields {
-  readonly title?: string;
-  readonly description?: string | null;
-  readonly status?: string;
-  readonly assignee?: string;
-  readonly task_order?: number;
-  readonly priority?: string;
-  readonly feature?: string | null;
+/** The fields of the tracker's `CreateTaskRequest` this pack sets, besides `project_id`. */
+export interface NewArchonTask {
+  readonly title: string;
+  readonly description: string;
+  readonly status: 'todo';
 }
-
-export type NewArchonTask = ArchonTaskFields & { readonly title: string };
 
 export class ArchonTrackerError extends Error {
   /** The HTTP status, or null when no response arrived or the response was unusable. */
@@ -48,7 +47,10 @@ export class ArchonTrackerError extends Error {
 
 /**
  * The tracker's base URL from its configured value (`ARCHON_TRACKER_BASE_URL`).
- * There is no default: an unset or malformed value is refused rather than guessed.
+ * There is no default: an unset or malformed value is refused rather than guessed. The
+ * value may hold a secret, so no message repeats it, and a value carrying credentials,
+ * a query or a fragment is refused: the tracker takes none, and every task URL this
+ * pack prints is built on the base.
  */
 export function trackerBaseUrl(value: string | undefined): URL {
   const raw = (value ?? '').trim();
@@ -56,11 +58,15 @@ export function trackerBaseUrl(value: string | undefined): URL {
   let url: URL;
   try {
     url = new URL(raw);
-  } catch (error) {
-    throw new ArchonTrackerError(`ARCHON_TRACKER_BASE_URL is not a URL: ${raw}`, null, { cause: error });
+  } catch {
+    // The parser's error quotes the value, so it is not kept as the cause.
+    throw new ArchonTrackerError('ARCHON_TRACKER_BASE_URL is not a URL.', null);
   }
   if (url.protocol !== 'http:' && url.protocol !== 'https:') {
-    throw new ArchonTrackerError(`ARCHON_TRACKER_BASE_URL must be http or https: ${raw}`, null);
+    throw new ArchonTrackerError('ARCHON_TRACKER_BASE_URL must be an http or https URL.', null);
+  }
+  if (url.username !== '' || url.password !== '' || url.search !== '' || url.hash !== '') {
+    throw new ArchonTrackerError('ARCHON_TRACKER_BASE_URL must not carry credentials, a query or a fragment.', null);
   }
   if (!url.pathname.endsWith('/')) url.pathname = `${url.pathname}/`;
   return url;
@@ -69,17 +75,25 @@ export function trackerBaseUrl(value: string | undefined): URL {
 /**
  * The Archon tracker a checkout's project declares as primary, or null when the checkout
  * has no project file or its project keeps work on GitHub. A project file that names the
- * Archon tracker but cannot reach it — an invalid file, a missing project id, an unset or
- * malformed base URL — is refused before any request, never read as GitHub.
+ * Archon tracker but cannot reach it — an unreadable or invalid file, a missing project
+ * id, a `github_repo` other than the repository this run works on, an unset or malformed
+ * base URL — is refused before any request, never read as GitHub.
  */
 export function declaredArchonTracker(
   checkout: string,
+  repo: QualifiedPr['repo'],
   baseUrlValue: string | undefined,
   fetchImpl: typeof fetch = fetch
 ): ArchonTracker | null {
-  if (!existsSync(join(checkout, PROJECT_FILE))) return null;
   const context = readProjectContext(checkout);
-  if (context.trackerPrimary !== 'archon') return null;
+  if (context === null || context.trackerPrimary !== 'archon') return null;
+  if (!sameRepo(context.githubRepo, repo)) {
+    const declared = `${context.githubRepo.host}/${context.githubRepo.path}`;
+    throw new ArchonTrackerError(
+      `${PROJECT_FILE} is ${declared}'s, not ${repo.host}/${repo.path}'s, so its tracker project is not this run's.`,
+      null
+    );
+  }
   return new ArchonTracker(context, trackerBaseUrl(baseUrlValue), fetchImpl);
 }
 
@@ -90,61 +104,41 @@ export class ArchonTracker {
     private readonly fetchImpl: typeof fetch = fetch
   ) {}
 
-  async createTask(task: NewArchonTask): Promise<ArchonTask> {
-    const created = taskOf(
-      await this.request('POST', 'api/tasks', { ...task, project_id: this.context.archonProjectId }),
-      'task'
-    );
+  /** Create a task in the project and return its id. */
+  async createTask(task: NewArchonTask): Promise<string> {
+    const body = await this.request('POST', this.url('api/tasks'), { ...task, project_id: this.context.archonProjectId });
+    const created = isObject(body) ? body.task : undefined;
+    if (!isObject(created) || typeof created.id !== 'string' || typeof created.project_id !== 'string') {
+      throw new ArchonTrackerError(`the tracker's create response is not a task: ${JSON.stringify(body).slice(0, 500)}`, null);
+    }
     if (created.project_id !== this.context.archonProjectId) {
       throw new ArchonTrackerError(
         `the tracker created task ${created.id} in project ${created.project_id}, not ${this.context.archonProjectId}.`,
         null
       );
     }
-    return created;
+    return created.id;
   }
 
-  /**
-   * Create the one task in the project whose description begins with `marker`, or
-   * recover it when an earlier attempt already created it, so a repeated call never
-   * creates a second one. A recovered task is returned as it is, never edited. Refuses
-   * when more than one task carries the marker.
-   */
-  async createMarkedTask(marker: string, task: NewArchonTask & { readonly description: string }): Promise<ArchonTask> {
-    if (firstLine(task.description) !== marker) {
-      throw new ArchonTrackerError('the task description must begin with its marker', null);
-    }
-    const marked = (await this.listProjectTasks()).filter(
-      listed => listed.description !== null && firstLine(listed.description) === marker
-    );
-    if (marked.length > 1) throw new ArchonTrackerError(`more than one task carries ${marker}`, null);
-    return marked[0] ?? (await this.createTask(task));
+  /** Every task in the project, archived ones included: the tracker leaves those out unless asked. */
+  async listProjectTasks(): Promise<ArchonTask[]> {
+    const url = this.url(`api/projects/${encodeURIComponent(this.context.archonProjectId)}/tasks`);
+    url.searchParams.set('include_archived', 'true');
+    const body = await this.request('GET', url);
+    if (!Array.isArray(body)) throw new ArchonTrackerError('the task list is not an array.', null);
+    return body.map(taskOf);
   }
 
   /** The task's address on the tracker's API; the tracker has no other link to a task. */
   taskUrl(taskId: string): string {
-    return new URL(`api/tasks/${encodeURIComponent(taskId)}`, this.baseUrl).href;
+    return this.url(`api/tasks/${encodeURIComponent(taskId)}`).href;
   }
 
-  async getTask(taskId: string): Promise<ArchonTask> {
-    return taskOf(await this.request('GET', `api/tasks/${encodeURIComponent(taskId)}`), null);
+  private url(path: string): URL {
+    return new URL(path, this.baseUrl);
   }
 
-  async listProjectTasks(): Promise<ArchonTask[]> {
-    const body = await this.request(
-      'GET',
-      `api/projects/${encodeURIComponent(this.context.archonProjectId)}/tasks`
-    );
-    if (!Array.isArray(body)) throw new ArchonTrackerError('the task list is not an array.', null);
-    return body.map(item => taskOf(item, null));
-  }
-
-  async updateTask(taskId: string, fields: ArchonTaskFields): Promise<ArchonTask> {
-    return taskOf(await this.request('PUT', `api/tasks/${encodeURIComponent(taskId)}`, fields), 'task');
-  }
-
-  private async request(method: string, path: string, body?: unknown): Promise<unknown> {
-    const url = new URL(path, this.baseUrl);
+  private async request(method: 'GET' | 'POST', url: URL, body?: unknown): Promise<unknown> {
     const where = `${method} ${url.pathname}`;
     let response: Response;
     try {
@@ -168,22 +162,17 @@ export class ArchonTracker {
   }
 }
 
-/**
- * A task from a response body. Create and update wrap the task as `{ task }`; reads
- * return it bare. The service's OpenAPI document leaves response bodies untyped, so
- * the fields this pack relies on are checked here.
- */
-function taskOf(body: unknown, envelope: 'task' | null): ArchonTask {
-  const value = envelope === null ? body : isObject(body) ? body[envelope] : undefined;
+function taskOf(value: unknown): ArchonTask {
   if (
     !isObject(value) ||
     typeof value.id !== 'string' ||
     typeof value.project_id !== 'string' ||
     typeof value.title !== 'string' ||
     (typeof value.description !== 'string' && value.description !== null) ||
-    typeof value.status !== 'string'
+    typeof value.status !== 'string' ||
+    typeof value.archived !== 'boolean'
   ) {
-    throw new ArchonTrackerError(`the tracker returned something that is not a task: ${JSON.stringify(body).slice(0, 500)}`, null);
+    throw new ArchonTrackerError(`the tracker listed something that is not a task: ${JSON.stringify(value).slice(0, 500)}`, null);
   }
   return {
     id: value.id,
@@ -191,9 +180,6 @@ function taskOf(body: unknown, envelope: 'task' | null): ArchonTask {
     title: value.title,
     description: value.description,
     status: value.status,
+    archived: value.archived,
   };
-}
-
-function firstLine(text: string): string {
-  return text.split(/\r?\n/, 1)[0] ?? '';
 }

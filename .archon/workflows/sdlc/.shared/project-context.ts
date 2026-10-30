@@ -10,16 +10,16 @@
 
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
+import type { QualifiedPr } from './forge.ts';
+import { urlRepo } from './remote.ts';
 import { isObject } from './typed.ts';
 
 export const PROJECT_FILE = '.factory/project.yaml';
 
-export type TrackerPrimary = 'archon' | 'github';
-
 interface ProjectContextBase {
   readonly projectName: string;
-  /** `owner/name` on GitHub. */
-  readonly githubRepo: string;
+  /** The repository the file was written for: `owner/name` on github.com, or a remote URL. */
+  readonly githubRepo: QualifiedPr['repo'];
   /** Project policy: open a GitHub issue once a tracker task is ready. Recorded, not yet acted on. */
   readonly createGithubIssueOnReady: boolean;
 }
@@ -41,20 +41,22 @@ export class ProjectContextError extends Error {
 }
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-const GITHUB_REPO = /^[^/\s]+\/[^/\s]+$/;
+const GITHUB_REPO = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
 
-/** Read and validate `<checkout>/.factory/project.yaml`; every defect is a `ProjectContextError`. */
-export function readProjectContext(checkout: string): ProjectContext {
+/**
+ * Read and validate `<checkout>/.factory/project.yaml`, or null when the file does not
+ * exist. Only a missing file means the repository declares no project: an unreadable
+ * `.factory/` or file is a `ProjectContextError` like every other defect, never "none".
+ */
+export function readProjectContext(checkout: string): ProjectContext | null {
   const file = join(checkout, PROJECT_FILE);
   let source: string;
   try {
     source = readFileSync(file, 'utf8');
   } catch (error) {
-    const missing = (error as NodeJS.ErrnoException).code === 'ENOENT';
-    throw new ProjectContextError(
-      missing ? `${file} does not exist; this repository declares no project context.` : `${file} could not be read.`,
-      { cause: error }
-    );
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null;
+    const code = (error as NodeJS.ErrnoException).code ?? 'an unknown error';
+    throw new ProjectContextError(`${file} could not be read (${code}).`, { cause: error });
   }
   let document: unknown;
   try {
@@ -79,9 +81,9 @@ function parseProjectContext(document: unknown, file: string): ProjectContext {
   if (typeof projectName !== 'string' || projectName.trim() === '') {
     return fail('`project.name` must be a non-empty string.');
   }
-  const githubRepo = project.github_repo;
-  if (typeof githubRepo !== 'string' || !GITHUB_REPO.test(githubRepo)) {
-    return fail('`project.github_repo` must be `owner/name`.');
+  const githubRepo = typeof project.github_repo === 'string' ? repoOf(project.github_repo) : undefined;
+  if (githubRepo === undefined) {
+    return fail('`project.github_repo` must be `owner/name` or the repository\'s remote URL.');
   }
   const createGithubIssueOnReady = tracker.create_github_issue_on_ready;
   if (typeof createGithubIssueOnReady !== 'boolean') {
@@ -104,4 +106,9 @@ function parseProjectContext(document: unknown, file: string): ProjectContext {
     default:
       return fail('`tracker.primary` must be archon or github.');
   }
+}
+
+function repoOf(value: string): QualifiedPr['repo'] | undefined {
+  const trimmed = value.trim();
+  return GITHUB_REPO.test(trimmed) ? { host: 'github.com', path: trimmed } : urlRepo(trimmed);
 }

@@ -10,12 +10,18 @@
  * terminal.
  *
  * Writes `$ARTIFACTS_DIR/drain/queue.json`: the queued records, each run with the
- * questions earlier passes asked about it, for the agent and the outcome.
+ * questions earlier passes asked about it, for the agent and the outcome. When the
+ * checkout's project files discoveries into the Archon tracker, also writes
+ * `$ARTIFACTS_DIR/drain/tasks.json`: every task an earlier pass filed there, archived
+ * ones included, so the agent can reuse a filed task's key. That tracker is read before
+ * any run is claimed, so a misconfigured one stops the pass before it holds anything.
  */
 
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { declaredArchonTracker } from '../../.shared/archon-tracker.ts';
 import {
+  filedDiscoveries,
   parseRunDocument,
   type Queue,
   type QueuedRun,
@@ -109,7 +115,7 @@ function claimUndecided<R extends { ref: string }>(
   return records.length === 0 ? null : { records, questions: document.questions ?? [] };
 }
 
-function main(): void {
+async function main(): Promise<void> {
   // Every input is validated before anything is read or written.
   const since = parseTime('since', trimmed(process.env.INPUTS_SINCE));
   const until = parseTime('until', trimmed(process.env.INPUTS_UNTIL));
@@ -122,6 +128,20 @@ function main(): void {
   if (repo.host === '' || repo.path === '') throw new Error('repo_host and repo_path are required');
   const self = trimmed(process.env.WORKFLOW_ID);
   if (self === '') throw new Error('WORKFLOW_ID is not set; the engine supplies it to every exec node');
+
+  const tracker = declaredArchonTracker(process.cwd(), repo, process.env.ARCHON_TRACKER_BASE_URL);
+  const filed =
+    tracker === null
+      ? null
+      : filedDiscoveries(await tracker.listProjectTasks()).map(({ key, refs, task }) => ({
+          key,
+          refs,
+          url: tracker.taskUrl(task.id),
+          title: task.title,
+          status: task.status,
+          archived: task.archived,
+          description: task.description,
+        }));
 
   const base = fetchDefaultBranch(repo);
   const documents = readRunDocuments();
@@ -178,15 +198,17 @@ function main(): void {
   mkdirSync(drain, { recursive: true });
   const document: Queue = { base, runs: queue };
   writeFileSync(join(drain, 'queue.json'), `${JSON.stringify(document, null, 2)}\n`);
+  if (filed !== null) writeFileSync(join(drain, 'tasks.json'), `${JSON.stringify(filed, null, 2)}\n`);
   emit({
     path: queue.length === 0 ? 'idle' : 'decide',
     base,
     policy_defaults: POLICY_DEFAULTS,
+    tracker: tracker === null ? 'github' : 'archon',
   });
 }
 
 try {
-  main();
+  await main();
 } catch (error) {
   refuse(`discoveries facts: ${error instanceof Error ? error.message : String(error)}`);
 }
