@@ -19,7 +19,7 @@ import type {
   ResolvedAiProfile,
   TierName,
 } from './model-validation';
-import type { DagNode, EffortLevel } from './schemas';
+import type { AgentNode, DagNode, EffortLevel } from './schemas';
 import { readComposedMeta } from './compiled-command';
 
 /**
@@ -302,4 +302,15 @@ export function assistantModelDefaults(config: {
     if (typeof model === 'string') models[provider] = model;
   }
   return models;
+}
+
+/**
+ * The node a cross-provider fallback runs: the configured fallback provider with fresh
+ * context and without the primary's model, which names a model of another provider.
+ * Credential preflight resolves the same node, so it prepares the credential the
+ * fallback will use.
+ */
+export function crossProviderFallbackNode(node: AgentNode, fallbackProvider: string): AgentNode {
+  const { model: _model, ...rest } = node;
+  return { ...rest, provider: fallbackProvider, context: 'fresh' };
 }

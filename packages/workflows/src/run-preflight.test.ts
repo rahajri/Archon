@@ -827,3 +827,75 @@ test('before its container exists, preflight refuses a stored credential but def
   );
   expect(checkCredential).not.toHaveBeenCalled();
 });
+
+describe('cross-provider fallback credentials', () => {
+  const workflow = makeTestResolvedWorkflow({
+    name: 'fallback',
+    nodes: [
+      { id: 'review', prompt: 'review', provider: 'claude', mutates_checkout: false },
+      { id: 'edit', prompt: 'edit', provider: 'claude' },
+    ],
+  });
+
+  test('a read-only agent node requires the configured fallback assistant', async () => {
+    const { deps } = fixture();
+    deps.loadConfig.mockResolvedValue({ ...config, assistant: 'codex' });
+    const disabled = await prepareRunAiConfiguration(deps, workflow, '/p');
+    expect(disabled.requirements.map(r => r.provider)).toEqual(['claude']);
+
+    deps.loadConfig.mockResolvedValue({
+      ...config,
+      assistant: 'codex',
+      crossProviderFallback: true,
+    });
+    const enabled = await prepareRunAiConfiguration(deps, workflow, '/p');
+    expect(enabled.requirements).toEqual([
+      { provider: 'claude', model: undefined, vendor: 'anthropic' },
+      { provider: 'codex', model: undefined, vendor: 'openai' },
+    ]);
+  });
+
+  test('the fallback provider is not required when it is already the primary provider', async () => {
+    const { deps } = fixture();
+    deps.loadConfig.mockResolvedValue({ ...config, crossProviderFallback: true });
+    const prepared = await prepareRunAiConfiguration(deps, workflow, '/p');
+    expect(prepared.requirements.map(r => r.provider)).toEqual(['claude']);
+  });
+
+  test("the user's stored fallback credential is selected for delivery", async () => {
+    const { deps, checkCredential } = fixture();
+    deps.loadConfig.mockResolvedValue({
+      ...config,
+      assistant: 'codex',
+      crossProviderFallback: true,
+    });
+    deps.getUserProviderCredential.mockImplementation(async () => ({
+      kind: 'api_key',
+      getStatus: async () => ({ state: 'usable', source: 'archon' }),
+    }));
+    const prepared = await prepareRunAiConfiguration(deps, workflow, '/p', { userId: 'origin' });
+    await assertRunCredentials(deps, prepared, { cwd: '/p' });
+    expect([...prepared.connectedVendors]).toEqual(['anthropic', 'openai']);
+    expect(checkCredential).not.toHaveBeenCalled();
+  });
+
+  test('a fallback provider without a usable login refuses the run before execution', async () => {
+    const { deps, provider } = fixture({ state: 'usable', source: 'native' });
+    const missing: IAgentProvider = {
+      ...provider,
+      checkCredential: async () => ({ state: 'not_connected', source: 'native' }),
+    };
+    deps.getAgentProvider.mockImplementation((name?: string) =>
+      name === 'codex' ? missing : provider
+    );
+    deps.loadConfig.mockResolvedValue({
+      ...config,
+      assistant: 'codex',
+      crossProviderFallback: true,
+    });
+    const prepared = await prepareRunAiConfiguration(deps, workflow, '/p', { userId: 'origin' });
+    await expect(assertRunCredentials(deps, prepared, { cwd: '/p' })).rejects.toThrow(
+      "Credential preflight failed for provider 'codex'"
+    );
+  });
+});

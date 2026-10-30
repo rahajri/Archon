@@ -14,6 +14,7 @@ import {
 import { spellWorkflowCommand } from '../../../deps';
 import { readNodeArtifacts, writeNodeArtifactsListing } from '../../../artifacts-index';
 import { readComposedMeta } from '../../../compiled-command';
+import { crossProviderFallbackNode } from '../../../node-model-resolution';
 import { safeSendMessage } from '../../../platform-messages';
 import { getLog } from '../../log';
 import { aiConfigTextResolver } from '../../references';
@@ -28,7 +29,8 @@ import {
   runNodeRetryLoop,
 } from '../../retry';
 import type { NodeExecutionResult } from '../../../node-record-serialization';
-import { recordNodeState } from '../../../node-event-write';
+import { persistNodeEvent, recordNodeState } from '../../../node-event-write';
+import { PROVIDER_FALLBACK_EVENT_TYPE } from '../../../store';
 import {
   checkoutSnapshotExcludes,
   checkoutStateSinceSnapshot,
@@ -566,9 +568,7 @@ async function runReadOnlyFallback(
   iteration: number | undefined,
   guard: CheckoutGuard
 ): Promise<FallbackOutcome> {
-  // Do not carry the primary provider's resolved model across providers.
-  const { model: _model, ...rest } = node;
-  const fallbackNode: AgentNode = { ...rest, provider: fallbackProvider, context: 'fresh' };
+  const fallbackNode = crossProviderFallbackNode(node, fallbackProvider);
 
   let resolved: ResolvedAgentProvider;
   try {
@@ -604,9 +604,9 @@ async function runReadOnlyFallback(
     );
   }
 
-  await ctx.deps.store.persistWorkflowEvent({
+  await persistNodeEvent(ctx.deps.store, {
     workflow_run_id: ctx.workflowRun.id,
-    event_type: 'provider_fallback',
+    event_type: PROVIDER_FALLBACK_EVENT_TYPE,
     step_name: ctx.stepNamePrefix + node.id,
     data: {
       primary_provider: provider,
