@@ -13,11 +13,14 @@
  * claim is released, except on a run with an asked record: it stays claimed by this run
  * until the question is answered and the run ends.
  *
- * The filing target is the one facts chose for this pass, not the checkout's project as
- * it reads now: the agent searched that target, and a resumed pass reruns only this node.
- * A project that no longer declares that target refuses the pass before any write.
+ * The filing target is the one facts chose for this pass, not the checkout's project and
+ * environment as they read now: the agent searched that target, and a resumed pass reruns
+ * only this node. A project that no longer declares that target, or an
+ * ARCHON_TRACKER_BASE_URL that now names another tracker, refuses the pass before any
+ * write rather than filing into a tracker the agent never searched.
  *
- * Bound inputs: INPUTS_PATH, INPUTS_TRACKER and INPUTS_ARCHON_PROJECT_ID from facts;
+ * Bound inputs: INPUTS_PATH, INPUTS_TRACKER, INPUTS_ARCHON_PROJECT_ID and
+ * INPUTS_TRACKER_BASE_URL from facts;
  * INPUTS_DECISIONS and INPUTS_SUMMARY from the agent, `null` when it did not run; the
  * workflow's INPUTS_REPO_HOST and INPUTS_REPO_PATH.
  */
@@ -126,7 +129,7 @@ function chosenTracker(target: FilingTarget, repo: QualifiedPr['repo']): ArchonT
   const current = filingTargetOf(tracker);
   if (!sameFilingTarget(current, target)) {
     throw new Error(
-      `nothing was written: facts chose ${describeFilingTarget(target)} for this pass, but the checkout's project now files into ${describeFilingTarget(current)}`
+      `nothing was written: facts chose ${describeFilingTarget(target)} for this pass, but the checkout now files into ${describeFilingTarget(current)}`
     );
   }
   return tracker;
@@ -145,7 +148,11 @@ async function main(): Promise<void> {
   const queue = JSON.parse(readFileSync(join(artifactsDir(), 'drain', 'queue.json'), 'utf8')) as Queue;
   const decisions = (nullableJson(process.env.INPUTS_DECISIONS) ?? []) as AgentDecision[];
   const summary = text(process.env.INPUTS_SUMMARY);
-  const target = parseFilingTarget(trimmed(process.env.INPUTS_TRACKER), trimmed(process.env.INPUTS_ARCHON_PROJECT_ID));
+  const target = parseFilingTarget({
+    tracker: trimmed(process.env.INPUTS_TRACKER),
+    archon_project_id: trimmed(process.env.INPUTS_ARCHON_PROJECT_ID),
+    tracker_base_url: trimmed(process.env.INPUTS_TRACKER_BASE_URL),
+  });
   const tracker = chosenTracker(target, repo);
   const filed = tracker === null ? [] : filedDiscoveries(await tracker.listProjectTasks());
 

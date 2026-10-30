@@ -50,7 +50,7 @@ export class ArchonTrackerError extends Error {
  * There is no default: an unset or malformed value is refused rather than guessed. A
  * value carrying credentials (userinfo), a query or a fragment is refused, and no refusal
  * here quotes the value, which may hold a secret. An accepted base therefore carries
- * none of those, so what is built on it may be printed: task URLs, the origin of a
+ * none of those, so it and what is built on it may be printed: task URLs, the origin of a
  * tracker that is unreachable, and the method and path of a request that fails.
  */
 export function trackerBaseUrl(value: string | undefined): URL {
@@ -101,7 +101,8 @@ export function declaredArchonTracker(
 export class ArchonTracker {
   constructor(
     readonly context: ArchonProjectContext,
-    private readonly baseUrl: URL,
+    /** As `trackerBaseUrl` accepted it, so it may be printed and carried. */
+    readonly baseUrl: URL,
     private readonly fetchImpl: typeof fetch = fetch
   ) {}
 

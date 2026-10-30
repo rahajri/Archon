@@ -100,12 +100,29 @@ describe("a run's discoveries", () => {
 
 const ISSUE = { repo: REPO, number: 7 };
 
-function outputSchema(node: 'facts' | 'decide'): Record<string, unknown> {
+function workflowNode(node: 'facts' | 'decide' | 'outcome'): { output_format?: Record<string, unknown>; with?: Record<string, unknown> } {
   const workflow = Bun.YAML.parse(readFileSync(join(PACK, 'discoveries/archon-discoveries.yaml'), 'utf8')) as {
-    nodes: { id: string; output_format?: Record<string, unknown> }[];
+    nodes: { id: string; output_format?: Record<string, unknown>; with?: Record<string, unknown> }[];
   };
-  return workflow.nodes.find(entry => entry.id === node)?.output_format ?? {};
+  return workflow.nodes.find(entry => entry.id === node) ?? {};
 }
+
+function outputSchema(node: 'facts' | 'decide'): Record<string, unknown> {
+  return workflowNode(node).output_format ?? {};
+}
+
+/** The facts output fields the outcome binds, by the input name it reads them under. */
+function outcomeBindsFromFacts(): Map<string, string> {
+  const bound = new Map<string, string>();
+  for (const [input, value] of Object.entries(workflowNode('outcome').with ?? {})) {
+    const field = typeof value === 'string' ? /^\$facts\.output\.(\w+)$/.exec(value)?.[1] : undefined;
+    if (field !== undefined) bound.set(input, field);
+  }
+  return bound;
+}
+
+const GITHUB_FIELDS = { tracker: 'github', archon_project_id: '', tracker_base_url: '' };
+const ARCHON_FIELDS = { tracker: 'archon', archon_project_id: 'project', tracker_base_url: 'http://127.0.0.1:8181/' };
 
 describe("a drained run's document", () => {
   test('round-trips through its parser, and one that does not parse refuses, naming the document', () => {
@@ -145,9 +162,37 @@ describe("a drained run's document", () => {
     const declared = (outputSchema('facts').properties as { tracker: { enum: string[] } }).tracker.enum;
     expect([...declared].sort()).toEqual([...FILING_TRACKERS].sort());
     for (const tracker of declared) {
-      expect(parseFilingTarget(tracker, tracker === 'github' ? '' : 'project')).toMatchObject({ tracker });
+      expect(parseFilingTarget(tracker === 'github' ? GITHUB_FIELDS : { ...ARCHON_FIELDS, tracker })).toMatchObject({ tracker });
     }
-    expect(() => parseFilingTarget('jira', 'project')).toThrow('is not a filing target');
+    expect(() => parseFilingTarget({ ...ARCHON_FIELDS, tracker: 'jira' })).toThrow('is not a filing target');
+  });
+
+  test('facts declares and requires every field of a filing target, and the outcome binds each under its own name', () => {
+    const facts = outputSchema('facts') as { properties: Record<string, unknown>; required: string[] };
+    const bound = outcomeBindsFromFacts();
+    for (const target of [parseFilingTarget(GITHUB_FIELDS), parseFilingTarget(ARCHON_FIELDS)]) {
+      for (const field of Object.keys(target)) {
+        expect(facts.properties).toHaveProperty(field);
+        expect(facts.required).toContain(field);
+        expect(bound.get(field)).toBe(field);
+      }
+    }
+  });
+
+  test.each([
+    ['an Archon target with no tracker base URL', { ...ARCHON_FIELDS, tracker_base_url: '' }],
+    ['an Archon target whose base URL is not normalized', { ...ARCHON_FIELDS, tracker_base_url: 'http://127.0.0.1:8181' }],
+    ['an Archon target whose base URL carries credentials', { ...ARCHON_FIELDS, tracker_base_url: 'http://user:S3CRET@127.0.0.1:8181/' }],
+    ['an Archon target whose base URL carries a query', { ...ARCHON_FIELDS, tracker_base_url: 'http://127.0.0.1:8181/?token=S3CRET' }],
+    ['a GitHub target that names a tracker base URL', { ...GITHUB_FIELDS, tracker_base_url: 'http://127.0.0.1:8181/' }],
+  ])('refuses %s, without quoting the URL', (_case, fields) => {
+    expect(() => parseFilingTarget(fields)).toThrow('is not a filing target');
+    try {
+      parseFilingTarget(fields);
+    } catch (error) {
+      expect(String(error)).not.toContain('S3CRET');
+      expect(String(error)).not.toContain('127.0.0.1');
+    }
   });
 });
 
@@ -286,14 +331,12 @@ function queued(facts: ScriptRun): string[] {
   return queue.runs.flatMap(run => run.records.map(entry => entry.ref));
 }
 
-/** The inputs the outcome binds from a facts run's output. */
+/** The inputs the outcome binds from a facts run's output, as the workflow binds them. */
 function fromFacts(facts: ScriptRun): Record<string, string> {
   const output = ok(facts);
-  return {
-    INPUTS_PATH: String(output.path),
-    INPUTS_TRACKER: String(output.tracker),
-    INPUTS_ARCHON_PROJECT_ID: String(output.archon_project_id),
-  };
+  return Object.fromEntries(
+    [...outcomeBindsFromFacts()].map(([input, field]) => [`INPUTS_${input.toUpperCase()}`, String(output[field])])
+  );
 }
 
 /** Run the outcome over a facts run's queue with these decisions. */
@@ -594,6 +637,7 @@ describe('filing discoveries into the Archon tracker', () => {
         INPUTS_PATH: 'decide',
         INPUTS_TRACKER: 'archon',
         INPUTS_ARCHON_PROJECT_ID: BAREA_PROJECT,
+        INPUTS_TRACKER_BASE_URL: `${TRACKER}/`,
         INPUTS_DECISIONS: JSON.stringify(fileIt('new-defect')([`${RUN}:review#0`])),
         INPUTS_SUMMARY: 's',
       },
@@ -607,7 +651,7 @@ describe('filing discoveries into the Archon tracker', () => {
     runArtifacts(at.outputRoot, RUN, { verdict: [record('new')] });
     const { facts, outcome } = decide(at, pass('pass-1', tracker), fileIt('new-defect'));
 
-    expect(ok(facts)).toMatchObject({ path: 'decide', tracker: 'archon' });
+    expect(ok(facts)).toMatchObject({ path: 'decide', tracker: 'archon', tracker_base_url: `${TRACKER}/` });
     expect(JSON.parse(readFileSync(join(facts.artifacts, 'drain/tasks.json'), 'utf8'))).toEqual([]);
     expect(ok(outcome).written).toEqual([{ key: 'new-defect', outcome: 'file', url: `${TRACKER}/api/tasks/task-1` }]);
     const { requests } = tracker.read();
@@ -775,7 +819,7 @@ describe('filing discoveries into the Archon tracker', () => {
         const file = join(at.checkout, '.factory/project.yaml');
         writeFileSync(file, readFileSync(file, 'utf8').replace(BAREA_PROJECT, OTHER_PROJECT));
       },
-      `Archon tracker project ${OTHER_PROJECT}`,
+      `Archon tracker project ${OTHER_PROJECT} at ${TRACKER}/`,
     ],
   ])('an outcome resumed after the project %s refuses rather than filing elsewhere', (_case, change, now) => {
     const at = install();
@@ -789,11 +833,42 @@ describe('filing discoveries into the Archon tracker', () => {
 
     expect(outcome.code).toBe(1);
     expect(outcome.stderr).toContain(
-      `facts chose Archon tracker project ${BAREA_PROJECT} for this pass, but the checkout's project now files into ${now}`
+      `facts chose Archon tracker project ${BAREA_PROJECT} at ${TRACKER}/ for this pass, but the checkout now files into ${now}`
     );
     expect([outcome.createdIssues, issueCreates(outcome)]).toEqual([[], []]);
     expect(tracker.read().requests.map(request => request.method)).toEqual(['GET']);
     expect(state(at, `discoveries/runs/${RUN}`)).toMatchObject({ claim: { run_id: 'pass-1' } });
+  }, 60_000);
+
+  const OTHER_TRACKER = 'http://tracker-b.example:9191';
+  test('an outcome resumed after ARCHON_TRACKER_BASE_URL moved to another tracker refuses before reading or writing it', () => {
+    const at = install();
+    projectFile(at, 'archon');
+    const tracker = fakeTracker();
+    runArtifacts(at.outputRoot, RUN, { verdict: [record('new')] });
+    const facts = script(at, 'facts', pass('pass-1', tracker));
+    expect(ok(facts)).toMatchObject({ tracker: 'archon', archon_project_id: BAREA_PROJECT, tracker_base_url: `${TRACKER}/` });
+    const outcome = outcomeAfter(at, pass('pass-1', tracker, OTHER_TRACKER), facts, fileIt('new-defect'));
+
+    expect(outcome.code).toBe(1);
+    expect(outcome.stderr).toContain(
+      `facts chose Archon tracker project ${BAREA_PROJECT} at ${TRACKER}/ for this pass, but the checkout now files into Archon tracker project ${BAREA_PROJECT} at ${OTHER_TRACKER}/`
+    );
+    expect(tracker.read().requests.map(request => `${request.method} ${request.url}`)).toEqual([LIST]);
+    expect([outcome.createdIssues, issueCreates(outcome)]).toEqual([[], []]);
+    expect(state(at, `discoveries/runs/${RUN}`)).toMatchObject({ claim: { run_id: 'pass-1' } });
+  }, 60_000);
+
+  test('an outcome resumed with ARCHON_TRACKER_BASE_URL spelled differently for the same tracker files there', () => {
+    const at = install();
+    projectFile(at, 'archon');
+    const tracker = fakeTracker();
+    runArtifacts(at.outputRoot, RUN, { verdict: [record('new')] });
+    const facts = script(at, 'facts', pass('pass-1', tracker));
+    const outcome = outcomeAfter(at, pass('pass-1', tracker, ` ${TRACKER}/ `), facts, fileIt('new-defect'));
+
+    expect(ok(outcome).written).toEqual([{ key: 'new-defect', outcome: 'file', url: `${TRACKER}/api/tasks/task-1` }]);
+    expect(tracker.read().requests.every(request => request.url.startsWith(`${TRACKER}/`))).toBe(true);
   }, 60_000);
 
   test('an outcome resumed after the project moved to the Archon tracker refuses rather than filing a task the agent never searched for', () => {
@@ -807,17 +882,20 @@ describe('filing discoveries into the Archon tracker', () => {
 
     expect(outcome.code).toBe(1);
     expect(outcome.stderr).toContain(
-      `facts chose GitHub issues for this pass, but the checkout's project now files into Archon tracker project ${BAREA_PROJECT}`
+      `facts chose GitHub issues for this pass, but the checkout now files into Archon tracker project ${BAREA_PROJECT} at ${TRACKER}/`
     );
     expect([outcome.createdIssues, issueCreates(outcome)]).toEqual([[], []]);
     expect(tracker.read().requests).toEqual([]);
   }, 60_000);
 
   test.each([
-    ['archon', ''],
-    ['github', BAREA_PROJECT],
-    ['', ''],
-  ])('an outcome bound to tracker "%s" and project "%s" refuses before reading anything', (trackerInput, projectInput) => {
+    ['archon', '', `${TRACKER}/`],
+    ['archon', BAREA_PROJECT, ''],
+    ['archon', BAREA_PROJECT, 'http://user:S3CRET@127.0.0.1:8181/'],
+    ['github', BAREA_PROJECT, ''],
+    ['github', '', `${TRACKER}/`],
+    ['', '', ''],
+  ])('an outcome bound to tracker "%s", project "%s" and base URL "%s" refuses before reading anything', (trackerInput, projectInput, baseInput) => {
     const at = install();
     projectFile(at, 'archon');
     const tracker = fakeTracker();
@@ -829,6 +907,7 @@ describe('filing discoveries into the Archon tracker', () => {
         INPUTS_PATH: 'decide',
         INPUTS_TRACKER: trackerInput,
         INPUTS_ARCHON_PROJECT_ID: projectInput,
+        INPUTS_TRACKER_BASE_URL: baseInput,
         INPUTS_DECISIONS: JSON.stringify(fileIt('new-defect')([`${RUN}:review#0`])),
         INPUTS_SUMMARY: 's',
       },
@@ -836,6 +915,7 @@ describe('filing discoveries into the Archon tracker', () => {
     );
     expect(outcome.code).toBe(1);
     expect(outcome.stderr).toContain('is not a filing target');
+    expect(`${outcome.stdout}${outcome.stderr}`).not.toContain('S3CRET');
     expect([outcome.createdIssues, issueCreates(outcome)]).toEqual([[], []]);
     expect(tracker.read().requests).toEqual([]);
   }, 60_000);
@@ -930,7 +1010,7 @@ describe('filing discoveries into the Archon tracker', () => {
     runArtifacts(at.outputRoot, RUN, { verdict: [record('new')] });
     const { facts, outcome } = decide(at, pass('pass-1', tracker), fileIt('new-defect'));
 
-    expect(ok(facts)).toMatchObject({ tracker: 'github' });
+    expect(ok(facts)).toMatchObject({ tracker: 'github', archon_project_id: '', tracker_base_url: '' });
     ok(outcome);
     expect(outcome.createdIssues).toEqual([
       expect.objectContaining({ title: 'A new defect', body: expect.stringMatching(/^<!-- archon-discovery new-defect -->\nThe brief\./) }),
@@ -944,7 +1024,7 @@ describe('filing discoveries into the Archon tracker', () => {
     runArtifacts(at.outputRoot, RUN, { verdict: [record('new')] });
     const { facts, outcome } = decide(at, { runId: 'pass-1', runs: [RUN], preload: tracker.preload }, fileIt('new-defect'));
 
-    expect(ok(facts)).toMatchObject({ tracker: 'github' });
+    expect(ok(facts)).toMatchObject({ tracker: 'github', archon_project_id: '', tracker_base_url: '' });
     expect(existsSync(join(facts.artifacts, 'drain/tasks.json'))).toBe(false);
     ok(outcome);
     expect(outcome.createdIssues).toEqual([

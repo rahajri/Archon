@@ -190,9 +190,11 @@ again. It reaches the tracker at `ARCHON_TRACKER_BASE_URL`, set in the environme
 Archon runs with, for example `ARCHON_TRACKER_BASE_URL=http://127.0.0.1:8181` in
 `~/.archon/.env`. There is no default. A value with credentials (userinfo), a query or
 a fragment is refused, and no refusal quotes the value or any part of it, since it may
-hold a secret. An accepted value carries none of those, so diagnostics may show what is
-built on it, and only that: task URLs in the outcome, the origin of a tracker that is
-unreachable, and the method and path of a request that fails. Besides those, a failed
+hold a secret. An accepted value carries none of those, so diagnostics may show it and
+what is built on it, and only that: the normalized value itself, which the discoveries
+workflow carries from `facts` to its outcome and names when a resumed outcome finds it
+changed, task URLs in the outcome, the origin of a tracker that is unreachable, and the
+method and path of a request that fails. Besides those, a failed
 request shows its status and the start of the tracker's response, and JSON in a
 successful response that should be a task and is not shows its start.
 
@@ -895,9 +897,10 @@ terminal report lists.
   has different refs; finding its task is the agent's judgment, made from
   `drain/tasks.json`, and it reuses that task's key. A tracker that is misconfigured or
   fails refuses the pass, in `facts` before any run is claimed, rather than filing on
-  GitHub. `facts` carries the target it chose, GitHub or one tracker project, to the
-  outcome, which files there, a resumed outcome too, and refuses before any write when
-  the checkout's project no longer declares that target.
+  GitHub. `facts` carries the target it chose, GitHub or one tracker project on the
+  tracker at `ARCHON_TRACKER_BASE_URL` as it accepted and normalized it, to the outcome,
+  which files there, a resumed outcome too, and refuses before any write when the
+  checkout's project or `ARCHON_TRACKER_BASE_URL` no longer names that target.
 - **Questions.** Every `ask` in a pass becomes one attention item labelled
   `discoveries: question`. The answer is stored on the asking run's document. The runs
   those records came from stay claimed by the asking run until it ends, so no other

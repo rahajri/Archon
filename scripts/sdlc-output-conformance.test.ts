@@ -459,6 +459,7 @@ describe('discoveries', () => {
           INPUTS_PATH: String(output.path),
           INPUTS_TRACKER: String(output.tracker),
           INPUTS_ARCHON_PROJECT_ID: String(output.archon_project_id),
+          INPUTS_TRACKER_BASE_URL: String(output.tracker_base_url),
           INPUTS_DECISIONS: JSON.stringify(decisions),
           INPUTS_SUMMARY: 'summary',
         },
