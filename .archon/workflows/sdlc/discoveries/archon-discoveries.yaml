@@ -145,7 +145,8 @@ nodes:
       type: object
       properties:
         summary: { type: string }
-        # Issues filed or recovered, and issues a discovery is tracked by (the
+        # Issues filed or recovered (the task's tracker API URL when the project
+        # files into the Archon tracker), and issues a discovery is tracked by (the
         # evidence comment's URL when one was posted).
         written:
           type: array

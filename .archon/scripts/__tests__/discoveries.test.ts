@@ -170,6 +170,8 @@ interface Pass {
   readonly statuses?: Record<string, string>;
   readonly issues?: GhIssue[];
   readonly subject?: { state: 'open' | 'closed' };
+  readonly env?: Record<string, string>;
+  readonly preload?: string;
 }
 
 type Script = 'facts' | 'outcome' | 'answer';
@@ -179,6 +181,7 @@ function script(at: Install, name: Script, pass: Pass, inputs: Record<string, st
     cwd: at.checkout,
     forge: { kind: 'command', argv: [process.execPath, FAKE_ARCHON] },
     gh: { issue: { number: 7, state: pass.subject?.state ?? 'open' }, issues: pass.issues ?? [] },
+    preload: pass.preload,
     artifacts,
     inputs: {
       ...at.env,
@@ -190,6 +193,7 @@ function script(at: Install, name: Script, pass: Pass, inputs: Record<string, st
       INPUTS_SINCE: '',
       INPUTS_UNTIL: '',
       INPUTS_LIMIT: '20',
+      ...pass.env,
       ...inputs,
     },
   });
@@ -400,6 +404,154 @@ describe('the discoveries scripts', () => {
       expect(result.gh).toEqual([]);
     }
     expect(documents(at)).toEqual([]);
+  }, 60_000);
+});
+
+// --- filing into the Archon tracker a project declares -------------------------------
+
+const BAREA_PROJECT = 'd9f7bb82-5fbc-43d1-aec5-b30006e98182';
+const TRACKER = 'http://127.0.0.1:8181';
+
+function projectFile(at: Install, primary: 'archon' | 'github'): void {
+  mkdirSync(join(at.checkout, '.factory'));
+  writeFileSync(
+    join(at.checkout, '.factory/project.yaml'),
+    `project:\n  name: BAREA\n  archon_project_id: ${BAREA_PROJECT}\n  github_repo: rahajri/BAREA\n` +
+      `tracker:\n  primary: ${primary}\n  create_github_issue_on_ready: true\n`
+  );
+}
+
+interface TrackerState {
+  readonly tasks: Record<string, unknown>[];
+  readonly requests: { method: string; url: string; body: unknown }[];
+  readonly down?: boolean;
+}
+
+/** A fake tracker behind the script's fetch, holding its tasks and every request in one file. */
+function fakeTracker(tasks: Record<string, unknown>[] = [], down = false): { path: string; preload: string; read: () => TrackerState } {
+  const path = join(track(mkdtempSync(join(tmpdir(), 'archon-discoveries-tracker-'))), 'tracker.json');
+  writeFileSync(path, JSON.stringify({ tasks, requests: [], down }));
+  const preload = `
+{
+  const fs = require('node:fs');
+  globalThis.fetch = async (input, init = {}) => {
+    const state = JSON.parse(fs.readFileSync(${JSON.stringify(path)}, 'utf8'));
+    const url = new URL(String(input));
+    const method = init.method ?? 'GET';
+    const body = typeof init.body === 'string' ? JSON.parse(init.body) : undefined;
+    state.requests.push({ method, url: url.href, body });
+    let response;
+    if (state.down) {
+      response = new Response('tracker unavailable', { status: 503 });
+    } else if (method === 'GET' && url.pathname.startsWith('/api/projects/')) {
+      response = Response.json(state.tasks.filter(task => url.pathname === '/api/projects/' + task.project_id + '/tasks'));
+    } else if (method === 'POST' && url.pathname === '/api/tasks') {
+      const task = { id: 'task-' + String(state.tasks.length + 1), status: 'todo', description: null, ...body };
+      state.tasks.push(task);
+      response = Response.json({ message: 'Task created successfully', task });
+    } else {
+      response = new Response('not found', { status: 404 });
+    }
+    fs.writeFileSync(${JSON.stringify(path)}, JSON.stringify(state));
+    return response;
+  };
+}
+`;
+  return { path, preload, read: () => JSON.parse(readFileSync(path, 'utf8')) as TrackerState };
+}
+
+/** gh calls that create an issue: the only issue write a filing makes. */
+const issueCreates = (run: ScriptRun): string[] => run.gh.filter(argv => argv.includes('--method POST') && /\/issues( |$)/.test(argv));
+
+describe('filing discoveries into the Archon tracker', () => {
+  test("files each discovery as a todo task in the project's Archon project, and opens no issue", () => {
+    const at = install();
+    projectFile(at, 'archon');
+    const tracker = fakeTracker();
+    runArtifacts(at.outputRoot, RUN, { verdict: [record('new')] });
+    const { outcome } = decide(
+      at,
+      { runId: 'pass-1', runs: [RUN], preload: tracker.preload, env: { ARCHON_TRACKER_BASE_URL: TRACKER } },
+      fileIt('new-defect')
+    );
+
+    expect(ok(outcome).written).toEqual([{ key: 'new-defect', outcome: 'file', url: `${TRACKER}/api/tasks/task-1` }]);
+    const { requests } = tracker.read();
+    expect(requests.map(request => `${request.method} ${request.url}`)).toEqual([
+      `GET ${TRACKER}/api/projects/${BAREA_PROJECT}/tasks`,
+      `POST ${TRACKER}/api/tasks`,
+    ]);
+    expect(requests[1]?.body).toEqual({
+      title: 'A new defect',
+      description: expect.stringMatching(/^<!-- archon-discovery new-defect -->\nThe brief\.\n\n---\nFound by Archon run /),
+      status: 'todo',
+      project_id: BAREA_PROJECT,
+    });
+    expect([outcome.createdIssues, issueCreates(outcome)]).toEqual([[], []]);
+    expect(state(at, `discoveries/runs/${RUN}`)).toMatchObject({ claim: null, decided: [`${RUN}:review#0`] });
+  }, 60_000);
+
+  test('a key whose task an earlier pass already created recovers that task, so a rerun creates nothing', () => {
+    const at = install();
+    projectFile(at, 'archon');
+    const existing = {
+      id: 'task-7',
+      project_id: BAREA_PROJECT,
+      title: 'A new defect',
+      description: '<!-- archon-discovery new-defect -->\nThe brief.',
+      status: 'doing',
+    };
+    const tracker = fakeTracker([existing]);
+    runArtifacts(at.outputRoot, RUN, { verdict: [record('new')] });
+    const { outcome } = decide(
+      at,
+      { runId: 'pass-2', runs: [RUN], preload: tracker.preload, env: { ARCHON_TRACKER_BASE_URL: TRACKER } },
+      fileIt('new-defect')
+    );
+
+    expect(ok(outcome).written).toEqual([{ key: 'new-defect', outcome: 'file', url: `${TRACKER}/api/tasks/task-7` }]);
+    expect(tracker.read().requests.map(request => request.method)).toEqual(['GET']);
+    expect(tracker.read().tasks).toEqual([existing]);
+    expect(outcome.createdIssues).toEqual([]);
+  }, 60_000);
+
+  test.each([
+    ['the tracker fails', TRACKER, true, /503: tracker unavailable/],
+    ['ARCHON_TRACKER_BASE_URL is unset', '', false, /ARCHON_TRACKER_BASE_URL is not set/],
+  ])('when %s, the pass refuses and opens no issue in its place', (_case, base, down, why) => {
+    const at = install();
+    projectFile(at, 'archon');
+    const tracker = fakeTracker([], down);
+    runArtifacts(at.outputRoot, RUN, { verdict: [record('new')] });
+    const { outcome } = decide(
+      at,
+      { runId: 'pass-1', runs: [RUN], preload: tracker.preload, env: { ARCHON_TRACKER_BASE_URL: base } },
+      fileIt('new-defect')
+    );
+
+    expect(outcome.code).toBe(1);
+    expect(outcome.stderr).toMatch(why);
+    expect([outcome.createdIssues, issueCreates(outcome)]).toEqual([[], []]);
+    expect(tracker.read().tasks).toEqual([]);
+    expect(state(at, `discoveries/runs/${RUN}`)).toEqual({ version: 1, claim: expect.objectContaining({ run_id: 'pass-1' }) });
+  }, 60_000);
+
+  test('a project whose tracker is github files the issue as before and never calls the tracker', () => {
+    const at = install();
+    projectFile(at, 'github');
+    const tracker = fakeTracker();
+    runArtifacts(at.outputRoot, RUN, { verdict: [record('new')] });
+    const { outcome } = decide(
+      at,
+      { runId: 'pass-1', runs: [RUN], preload: tracker.preload, env: { ARCHON_TRACKER_BASE_URL: TRACKER } },
+      fileIt('new-defect')
+    );
+
+    ok(outcome);
+    expect(outcome.createdIssues).toEqual([
+      expect.objectContaining({ title: 'A new defect', body: expect.stringMatching(/^<!-- archon-discovery new-defect -->\n/) }),
+    ]);
+    expect(tracker.read().requests).toEqual([]);
   }, 60_000);
 });
 

@@ -105,13 +105,3 @@ function parseProjectContext(document: unknown, file: string): ProjectContext {
       return fail('`tracker.primary` must be archon or github.');
   }
 }
-
-/** The context, proved to name the Archon tracker as primary. */
-export function requireArchonTracker(context: ProjectContext): ArchonProjectContext {
-  if (context.trackerPrimary !== 'archon') {
-    throw new ProjectContextError(
-      `project ${context.projectName} uses tracker.primary=${context.trackerPrimary}, not archon.`
-    );
-  }
-  return context;
-}

@@ -181,11 +181,13 @@ engine's codebase for the checkout, and it is never derived from a repository na
 updates tasks in that project, and sends the context's `archon_project_id` as every
 created task's `project_id`. It reaches the tracker at `ARCHON_TRACKER_BASE_URL`, set
 in the environment Archon runs with, for example `ARCHON_TRACKER_BASE_URL=http://127.0.0.1:8181`
-in `~/.archon/.env`. There is no default. Building the tracker refuses, before any
-request, a checkout with no project file, a file that is not valid YAML or misses a
-field, a project whose `tracker.primary` is not `archon` or that has no
-`archon_project_id`, and an unset or non-http(s) base URL. A repository without the
-file is untouched unless something asks it for an Archon task.
+in `~/.archon/.env`. There is no default. A checkout with no project file, or whose
+`tracker.primary` is `github`, declares no tracker. One whose project file is not valid
+YAML or misses a field, or names `archon` with no `archon_project_id` or with an unset
+or non-http(s) base URL, is refused before any request, never read as GitHub.
+
+[Discoveries](#discoveries) are the one work item filed there today: a project that
+declares the Archon tracker gets a task where it would otherwise get an issue.
 
 ## Public writes belong to a script
 
@@ -847,7 +849,12 @@ terminal report lists.
   writes. A filed issue's body begins with `<!-- archon-discovery <key> -->`, and the
   create looks for that marker across every issue first; the evidence comment carries
   the same marker and is replaced in place. So a pass run again after a stop, or a key
-  filed twice, never opens a second issue or comment. Last it records the decided refs
+  filed twice, never opens a second issue or comment. When the checkout's
+  `.factory/project.yaml` names the [Archon task tracker](#archon-task-tracker) as
+  primary, a filing is a `todo` task in that project instead, with the same body as its
+  description, recovered by the same marker across the project's tasks; it opens no
+  issue, and a tracker that is misconfigured or fails refuses the pass rather than
+  filing on GitHub. A `track` still names a GitHub issue. Last it records the decided refs
   and the questions on each run's document. Filed issues carry no labels: intake
   triages them like any other issue, which it does only when the install's forge
   identity is on `maintainers.json`.

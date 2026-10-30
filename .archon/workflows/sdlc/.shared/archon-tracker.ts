@@ -8,7 +8,9 @@
  * tracker cannot be built without one, so there is no project to fall back to.
  */
 
-import { type ArchonProjectContext, readProjectContext, requireArchonTracker } from './project-context.ts';
+import { existsSync } from 'node:fs';
+import { join } from 'node:path';
+import { type ArchonProjectContext, PROJECT_FILE, readProjectContext } from './project-context.ts';
 import { isObject } from './typed.ts';
 
 /** The fields of a task this pack reads; the tracker returns more. */
@@ -16,6 +18,7 @@ export interface ArchonTask {
   readonly id: string;
   readonly project_id: string;
   readonly title: string;
+  readonly description: string | null;
   readonly status: string;
 }
 
@@ -64,15 +67,19 @@ export function trackerBaseUrl(value: string | undefined): URL {
 }
 
 /**
- * The Archon tracker for a checkout, refused before any request when its project file,
- * its tracker choice or the base URL is missing or invalid.
+ * The Archon tracker a checkout's project declares as primary, or null when the checkout
+ * has no project file or its project keeps work on GitHub. A project file that names the
+ * Archon tracker but cannot reach it — an invalid file, a missing project id, an unset or
+ * malformed base URL — is refused before any request, never read as GitHub.
  */
-export function archonTrackerFor(
+export function declaredArchonTracker(
   checkout: string,
   baseUrlValue: string | undefined,
   fetchImpl: typeof fetch = fetch
-): ArchonTracker {
-  const context = requireArchonTracker(readProjectContext(checkout));
+): ArchonTracker | null {
+  if (!existsSync(join(checkout, PROJECT_FILE))) return null;
+  const context = readProjectContext(checkout);
+  if (context.trackerPrimary !== 'archon') return null;
   return new ArchonTracker(context, trackerBaseUrl(baseUrlValue), fetchImpl);
 }
 
@@ -95,6 +102,28 @@ export class ArchonTracker {
       );
     }
     return created;
+  }
+
+  /**
+   * Create the one task in the project whose description begins with `marker`, or
+   * recover it when an earlier attempt already created it, so a repeated call never
+   * creates a second one. A recovered task is returned as it is, never edited. Refuses
+   * when more than one task carries the marker.
+   */
+  async createMarkedTask(marker: string, task: NewArchonTask & { readonly description: string }): Promise<ArchonTask> {
+    if (firstLine(task.description) !== marker) {
+      throw new ArchonTrackerError('the task description must begin with its marker', null);
+    }
+    const marked = (await this.listProjectTasks()).filter(
+      listed => listed.description !== null && firstLine(listed.description) === marker
+    );
+    if (marked.length > 1) throw new ArchonTrackerError(`more than one task carries ${marker}`, null);
+    return marked[0] ?? (await this.createTask(task));
+  }
+
+  /** The task's address on the tracker's API; the tracker has no other link to a task. */
+  taskUrl(taskId: string): string {
+    return new URL(`api/tasks/${encodeURIComponent(taskId)}`, this.baseUrl).href;
   }
 
   async getTask(taskId: string): Promise<ArchonTask> {
@@ -151,9 +180,20 @@ function taskOf(body: unknown, envelope: 'task' | null): ArchonTask {
     typeof value.id !== 'string' ||
     typeof value.project_id !== 'string' ||
     typeof value.title !== 'string' ||
+    (typeof value.description !== 'string' && value.description !== null) ||
     typeof value.status !== 'string'
   ) {
     throw new ArchonTrackerError(`the tracker returned something that is not a task: ${JSON.stringify(body).slice(0, 500)}`, null);
   }
-  return { id: value.id, project_id: value.project_id, title: value.title, status: value.status };
+  return {
+    id: value.id,
+    project_id: value.project_id,
+    title: value.title,
+    description: value.description,
+    status: value.status,
+  };
+}
+
+function firstLine(text: string): string {
+  return text.split(/\r?\n/, 1)[0] ?? '';
 }

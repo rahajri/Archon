@@ -6,14 +6,13 @@ import { trackTempRoots } from './temp-roots';
 import {
   ArchonTracker,
   ArchonTrackerError,
-  archonTrackerFor,
+  declaredArchonTracker,
   trackerBaseUrl,
 } from '../../workflows/sdlc/.shared/archon-tracker';
 import {
   type ArchonProjectContext,
   ProjectContextError,
   readProjectContext,
-  requireArchonTracker,
 } from '../../workflows/sdlc/.shared/project-context';
 
 const track = trackTempRoots();
@@ -63,7 +62,7 @@ function fakeFetch(...responses: Response[]): { fetch: typeof fetch; sent: Sent[
 }
 
 function task(id: string, projectId = PROJECT_ID): Record<string, unknown> {
-  return { id, project_id: projectId, title: `task ${id}`, status: 'todo', assignee: 'User' };
+  return { id, project_id: projectId, title: `task ${id}`, description: null, status: 'todo', assignee: 'User' };
 }
 
 const json = (value: unknown, status = 200): Response => Response.json(value, { status });
@@ -107,11 +106,9 @@ describe('readProjectContext', () => {
     expect(() => readProjectContext(checkout(yaml))).toThrow(field);
   });
 
-  test('a github-primary project needs no archon_project_id and is not an archon tracker', () => {
+  test('a github-primary project needs no archon_project_id', () => {
     const yaml = ARCHON_PROJECT.replace(/ {2}archon_project_id: .*\n/, '').replace('primary: archon', 'primary: github');
-    const context = readProjectContext(checkout(yaml));
-    expect(context).toMatchObject({ trackerPrimary: 'github', archonProjectId: null });
-    expect(() => requireArchonTracker(context)).toThrow(/tracker\.primary=github, not archon/);
+    expect(readProjectContext(checkout(yaml))).toMatchObject({ trackerPrimary: 'github', archonProjectId: null });
   });
 });
 
@@ -129,15 +126,16 @@ describe('trackerBaseUrl', () => {
   );
 });
 
-describe('archonTrackerFor', () => {
+describe('declaredArchonTracker', () => {
   test("creates the task in the checkout's Archon project", async () => {
     const { fetch, sent } = fakeFetch(json({ message: 'Task created successfully', task: task('t1') }));
-    const tracker = archonTrackerFor(checkout(ARCHON_PROJECT), BASE, fetch);
+    const tracker = declaredArchonTracker(checkout(ARCHON_PROJECT), BASE, fetch);
+    if (tracker === null) throw new Error('an archon-primary project declares the tracker');
 
     expect(tracker.context.archonProjectId).toBe(PROJECT_ID);
     const created = await tracker.createTask({ title: 'Ship it', priority: 'high' });
 
-    expect(created).toEqual({ id: 't1', project_id: PROJECT_ID, title: 'task t1', status: 'todo' });
+    expect(created).toEqual({ id: 't1', project_id: PROJECT_ID, title: 'task t1', description: null, status: 'todo' });
     expect(sent).toEqual([
       { method: 'POST', url: `${BASE}/api/tasks`, body: { title: 'Ship it', priority: 'high', project_id: PROJECT_ID } },
     ]);
@@ -145,21 +143,28 @@ describe('archonTrackerFor', () => {
 
   test('sends requests to the configured base URL', async () => {
     const { fetch, sent } = fakeFetch(json([task('t1')]));
-    await archonTrackerFor(checkout(ARCHON_PROJECT), 'https://tracker.example/archon', fetch).listProjectTasks();
+    await declaredArchonTracker(checkout(ARCHON_PROJECT), 'https://tracker.example/archon', fetch)?.listProjectTasks();
     expect(sent[0]?.url).toBe(`https://tracker.example/archon/api/projects/${PROJECT_ID}/tasks`);
   });
 
   test.each([
-    ['no project file', undefined, BASE],
+    ['no project file', undefined],
+    ['a github-primary project', ARCHON_PROJECT.replace('primary: archon', 'primary: github')],
+  ])('declares no tracker for %s, whatever the base URL', (_case, yaml) => {
+    const { fetch, sent } = fakeFetch();
+    expect(declaredArchonTracker(checkout(yaml), undefined, fetch)).toBeNull();
+    expect(sent).toEqual([]);
+  });
+
+  test.each([
     ['invalid YAML', 'project: [', BASE],
     ['no archon_project_id', ARCHON_PROJECT.replace(/ {2}archon_project_id: .*\n/, ''), BASE],
     ['a malformed archon_project_id', ARCHON_PROJECT.replace(PROJECT_ID, 'BAREA'), BASE],
-    ['a github-primary project', ARCHON_PROJECT.replace('primary: archon', 'primary: github'), BASE],
     ['no base URL', ARCHON_PROJECT, undefined],
     ['a malformed base URL', ARCHON_PROJECT, 'tracker'],
   ])('refuses %s before sending anything', (_case, yaml, base) => {
     const { fetch, sent } = fakeFetch();
-    expect(() => archonTrackerFor(checkout(yaml), base, fetch)).toThrow();
+    expect(() => declaredArchonTracker(checkout(yaml), base, fetch)).toThrow();
     expect(sent).toEqual([]);
   });
 });
@@ -216,6 +221,32 @@ describe('ArchonTracker', () => {
   test('refuses a created task that landed in another project', async () => {
     const { tracker } = trackerWith(json({ task: task('t1', '00000000-0000-4000-8000-000000000000') }));
     await expect(tracker.createTask({ title: 'x' })).rejects.toThrow(/not d9f7bb82/);
+  });
+
+  test('creates a marked task once, then recovers it by its marker', async () => {
+    const marker = '<!-- archon-discovery a-defect -->';
+    const description = `${marker}\nThe brief.`;
+    const created = { ...task('t2'), description };
+    const { tracker, sent } = trackerWith(
+      json([{ ...task('t1'), description: 'unrelated' }, task('t3')]),
+      json({ message: 'Task created successfully', task: created }),
+      json([created])
+    );
+
+    expect((await tracker.createMarkedTask(marker, { title: 'A defect', description })).id).toBe('t2');
+    expect((await tracker.createMarkedTask(marker, { title: 'A defect', description })).id).toBe('t2');
+    expect(sent.map(request => request.method)).toEqual(['GET', 'POST', 'GET']);
+    expect(tracker.taskUrl('t2')).toBe(`${BASE}/api/tasks/t2`);
+  });
+
+  test('refuses a marked task whose description does not begin with the marker, or a marker two tasks carry', async () => {
+    const marker = '<!-- archon-discovery a-defect -->';
+    const marked = (id: string): Record<string, unknown> => ({ ...task(id), description: `${marker}\nThe brief.` });
+    const { tracker, sent } = trackerWith(json([marked('t1'), marked('t2')]));
+
+    await expect(tracker.createMarkedTask(marker, { title: 'x', description: 'The brief.' })).rejects.toThrow(/must begin with its marker/);
+    await expect(tracker.createMarkedTask(marker, { title: 'x', description: `${marker}\nx` })).rejects.toThrow(/more than one task/);
+    expect(sent.map(request => request.method)).toEqual(['GET']);
   });
 
   test('refuses a response that is not a task', async () => {

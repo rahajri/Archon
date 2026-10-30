@@ -5,10 +5,12 @@
  * an issue a discovery is tracked by reads back open in the repository. Then the public
  * writes: a filing creates or recovers its issue by the key's marker, and an evidence
  * comment is upserted by the same marker, so a pass that stops anywhere and is run
- * again never files or comments twice. Last, each run's document records the refs this
- * pass decided and the questions it asked, and its claim is released, except on a run
- * with an asked record: it stays claimed by this run until the question is answered and
- * the run ends.
+ * again never files or comments twice. A checkout whose `.factory/project.yaml` names
+ * the Archon tracker as primary files each discovery as a task in that project instead,
+ * recovered by the same marker; it never falls back to an issue. Last, each run's
+ * document records the refs this pass decided and the questions it asked, and its claim
+ * is released, except on a run with an asked record: it stays claimed by this run until
+ * the question is answered and the run ends.
  *
  * Bound inputs: INPUTS_PATH from facts; INPUTS_DECISIONS and INPUTS_SUMMARY from the
  * agent, `null` when it did not run; the workflow's INPUTS_REPO_HOST and
@@ -17,6 +19,7 @@
 
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { type ArchonTracker, declaredArchonTracker } from '../../.shared/archon-tracker.ts';
 import {
   type AgentDecision,
   checkDecisions,
@@ -27,7 +30,7 @@ import {
   refRun,
   runName,
 } from '../../.shared/discoveries.ts';
-import { forgeSource, sameRepo } from '../../.shared/forge.ts';
+import { forgeSource, type QualifiedPr, sameRepo } from '../../.shared/forge.ts';
 import { artifactsDir, emit, nullableJson, refuse, text, trimmed } from '../../.shared/io.ts';
 import { createIssue, viewIssue } from '../../.shared/issue.ts';
 import { upsertComment } from '../../.shared/pr.ts';
@@ -51,7 +54,20 @@ function issueBody(decision: AgentDecision & { outcome: 'file' }, sha: string): 
   ].join('\n');
 }
 
-function main(): void {
+/** File one discovery where the project keeps its work, and return where it is. */
+async function fileDiscovery(
+  tracker: ArchonTracker | null,
+  repo: QualifiedPr['repo'],
+  title: string,
+  body: string,
+  marker: string
+): Promise<string> {
+  if (tracker === null) return createIssue(repo, title, body, marker).url;
+  const task = await tracker.createMarkedTask(marker, { title, description: body, status: 'todo' });
+  return tracker.taskUrl(task.id);
+}
+
+async function main(): Promise<void> {
   const idle = trimmed(process.env.INPUTS_PATH) === 'idle';
   if (idle) {
     emit({ summary: IDLE, written: [], dropped: [], asked: [], question: '' });
@@ -64,6 +80,7 @@ function main(): void {
   const queue = JSON.parse(readFileSync(join(artifactsDir(), 'drain', 'queue.json'), 'utf8')) as Queue;
   const decisions = (nullableJson(process.env.INPUTS_DECISIONS) ?? []) as AgentDecision[];
   const summary = text(process.env.INPUTS_SUMMARY);
+  const tracker = declaredArchonTracker(process.cwd(), process.env.ARCHON_TRACKER_BASE_URL);
 
   const problems = checkDecisions(
     queue.runs.flatMap(run => run.records.map(record => record.ref)),
@@ -100,8 +117,8 @@ function main(): void {
   for (const decision of decisions) {
     const marker = discoveryMarker(decision.key);
     if (decision.outcome === 'file') {
-      const created = createIssue(repo, decision.title, issueBody(decision, sha), marker);
-      written.push({ key: decision.key, outcome: 'file', url: created.url });
+      const url = await fileDiscovery(tracker, repo, decision.title, issueBody(decision, sha), marker);
+      written.push({ key: decision.key, outcome: 'file', url });
     } else if (decision.outcome === 'track') {
       const comment = decision.comment?.trim() || null;
       // One marked comment per key: later evidence replaces it in place.
@@ -164,7 +181,7 @@ function main(): void {
 }
 
 try {
-  main();
+  await main();
 } catch (error) {
   refuse(`discoveries outcome: ${error instanceof Error ? error.message : String(error)}`);
 }
