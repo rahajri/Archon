@@ -175,6 +175,25 @@ export function checkDecisions(queued: readonly string[], decisions: readonly Ag
   return problems;
 }
 
+/**
+ * Where a pass files: GitHub issues, or tasks in one Archon tracker project. `facts`
+ * chooses it and carries it on its output, so the outcome, a resumed one too, files
+ * where the agent searched.
+ */
+export type FilingTarget =
+  | { readonly tracker: 'github'; readonly archon_project_id: '' }
+  | { readonly tracker: 'archon'; readonly archon_project_id: string };
+
+export function parseFilingTarget(tracker: string, archonProjectId: string): FilingTarget {
+  if (tracker === 'github' && archonProjectId === '') return { tracker, archon_project_id: '' };
+  if (tracker === 'archon' && archonProjectId !== '') return { tracker, archon_project_id: archonProjectId };
+  throw new Error(`"${tracker}" with Archon project "${archonProjectId}" is not a filing target`);
+}
+
+export function describeFilingTarget(target: FilingTarget): string {
+  return target.tracker === 'github' ? 'GitHub issues' : `Archon tracker project ${target.archon_project_id}`;
+}
+
 const MARKER_OPEN = '<!-- archon-discovery ';
 const REFS_OPEN = '<!-- archon-discovery-refs ';
 const COMMENT_CLOSE = ' -->';
@@ -198,25 +217,40 @@ export interface FiledDiscovery {
   readonly task: ArchonTask;
 }
 
-function between(line: string, open: string): string | undefined {
-  return line.startsWith(open) && line.endsWith(COMMENT_CLOSE) ? line.slice(open.length, -COMMENT_CLOSE.length) : undefined;
+/**
+ * The payload of a metadata comment line opening with `open`, null when the line is not
+ * one. A line that opens like one but does not close is corrupt, never "not one": read as
+ * absent, a task's marker or refs would stop matching and the pass would file it again.
+ */
+function metadata(line: string, open: string, task: ArchonTask): string | null {
+  if (!line.startsWith(open.trimEnd())) return null;
+  if (!line.startsWith(open) || !line.endsWith(COMMENT_CLOSE)) {
+    throw new Error(`task ${task.id} carries a corrupt ${open.trim()} line`);
+  }
+  return line.slice(open.length, -COMMENT_CLOSE.length);
 }
 
-/** The tasks a discoveries pass filed, by the marker on their description's first line. */
+/**
+ * The tasks a discoveries pass filed, by the marker on their description's first line.
+ * A task whose marker or refs line is corrupt refuses the read rather than matching nothing.
+ */
 export function filedDiscoveries(tasks: readonly ArchonTask[]): FiledDiscovery[] {
   return tasks.flatMap(task => {
     const [first = '', second = ''] = (task.description ?? '').split(/\r?\n/, 2);
-    const key = between(first, MARKER_OPEN);
-    if (key === undefined || !isKey(key)) return [];
-    const refs = between(second, REFS_OPEN);
-    if (refs === undefined) return [{ key, refs: [], task }];
+    const key = metadata(first, MARKER_OPEN, task);
+    if (key === null) return [];
+    if (!isKey(key)) throw new Error(`task ${task.id} carries a discovery marker whose key is not a decision key`);
+    const refs = metadata(second, REFS_OPEN, task);
+    if (refs === null) return [{ key, refs: [], task }];
     let parsed: unknown;
     try {
       parsed = JSON.parse(refs);
     } catch {
       parsed = undefined;
     }
-    if (!strings(parsed)) throw new Error(`task ${task.id} carries a discovery refs line that is not a list of refs`);
+    if (!Array.isArray(parsed) || parsed.length === 0 || !parsed.every(isQualifiedRef)) {
+      throw new Error(`task ${task.id} carries a discovery refs line that is not a list of refs`);
+    }
     return [{ key, refs: parsed, task }];
   });
 }

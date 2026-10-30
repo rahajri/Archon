@@ -13,22 +13,29 @@
  * claim is released, except on a run with an asked record: it stays claimed by this run
  * until the question is answered and the run ends.
  *
- * Bound inputs: INPUTS_PATH from facts; INPUTS_DECISIONS and INPUTS_SUMMARY from the
- * agent, `null` when it did not run; the workflow's INPUTS_REPO_HOST and
- * INPUTS_REPO_PATH.
+ * The filing target is the one facts chose for this pass, not the checkout's project as
+ * it reads now: the agent searched that target, and a resumed pass reruns only this node.
+ * A project that no longer declares that target refuses the pass before any write.
+ *
+ * Bound inputs: INPUTS_PATH, INPUTS_TRACKER and INPUTS_ARCHON_PROJECT_ID from facts;
+ * INPUTS_DECISIONS and INPUTS_SUMMARY from the agent, `null` when it did not run; the
+ * workflow's INPUTS_REPO_HOST and INPUTS_REPO_PATH.
  */
 
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { declaredArchonTracker, type NewArchonTask } from '../../.shared/archon-tracker.ts';
+import { type ArchonTracker, declaredArchonTracker, type NewArchonTask } from '../../.shared/archon-tracker.ts';
 import {
   type AgentDecision,
   checkDecisions,
+  describeFilingTarget,
   discoveryMarker,
   discoveryRefsLine,
   type FiledDiscovery,
+  type FilingTarget,
   filedDiscoveries,
   filingsOf,
+  parseFilingTarget,
   parseRunDocument,
   type Question,
   type Queue,
@@ -106,6 +113,21 @@ function trackingProblem(decision: AgentDecision & { outcome: 'track' }, repo: Q
   }
 }
 
+/** The tracker to file into: the checkout's, refused unless it is still the target facts chose. */
+function chosenTracker(target: FilingTarget, repo: QualifiedPr['repo']): ArchonTracker | null {
+  const tracker = declaredArchonTracker(process.cwd(), repo, process.env.ARCHON_TRACKER_BASE_URL);
+  const current: FilingTarget =
+    tracker === null
+      ? { tracker: 'github', archon_project_id: '' }
+      : { tracker: 'archon', archon_project_id: tracker.context.archonProjectId };
+  if (current.tracker !== target.tracker || current.archon_project_id !== target.archon_project_id) {
+    throw new Error(
+      `nothing was written: facts chose ${describeFilingTarget(target)} for this pass, but the checkout's project now files into ${describeFilingTarget(current)}`
+    );
+  }
+  return tracker;
+}
+
 async function main(): Promise<void> {
   const idle = trimmed(process.env.INPUTS_PATH) === 'idle';
   if (idle) {
@@ -119,7 +141,8 @@ async function main(): Promise<void> {
   const queue = JSON.parse(readFileSync(join(artifactsDir(), 'drain', 'queue.json'), 'utf8')) as Queue;
   const decisions = (nullableJson(process.env.INPUTS_DECISIONS) ?? []) as AgentDecision[];
   const summary = text(process.env.INPUTS_SUMMARY);
-  const tracker = declaredArchonTracker(process.cwd(), repo, process.env.ARCHON_TRACKER_BASE_URL);
+  const target = parseFilingTarget(trimmed(process.env.INPUTS_TRACKER), trimmed(process.env.INPUTS_ARCHON_PROJECT_ID));
+  const tracker = chosenTracker(target, repo);
   const filed = tracker === null ? [] : filedDiscoveries(await tracker.listProjectTasks());
 
   const problems = checkDecisions(

@@ -6,6 +6,7 @@ facts:
   base: { branch: dev, sha: "stub-sha" }
   policy_defaults: "/stub/policy"
   tracker: github
+  archon_project_id: ""
 decide:
   decisions:
     - outcome: file

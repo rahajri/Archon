@@ -4,6 +4,7 @@ facts:
   base: { branch: dev, sha: "stub-sha" }
   policy_defaults: "/stub/policy"
   tracker: github
+  archon_project_id: ""
 outcome:
   summary: "stub: No finished run has undecided discoveries."
   written: []

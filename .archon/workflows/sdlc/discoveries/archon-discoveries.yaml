@@ -58,9 +58,12 @@ nodes:
           required: [branch, sha]
         policy_defaults: { type: string }
         # Where a filing goes: a GitHub issue, or a task in the Archon tracker project
-        # the checkout's .factory/project.yaml declares.
+        # the checkout's .factory/project.yaml declares, whose id is archon_project_id
+        # (empty for github). The outcome files there and refuses a checkout whose
+        # project no longer declares it, a resumed pass included.
         tracker: { type: string, enum: [github, archon] }
-      required: [path, base, policy_defaults, tracker]
+        archon_project_id: { type: string }
+      required: [path, base, policy_defaults, tracker, archon_project_id]
 
   # Reads code at the base commit with git show and git grep; the checkout stays as
   # it was. The engine fails this node if the agent modifies it.
@@ -145,6 +148,8 @@ nodes:
     trigger_rule: none_failed_min_one_success
     with:
       path: "$facts.output.path"
+      tracker: "$facts.output.tracker"
+      archon_project_id: "$facts.output.archon_project_id"
       decisions: { from: "$decide.output.decisions", if_skipped: null }
       summary: { from: "$decide.output.summary", if_skipped: null }
     output_format:

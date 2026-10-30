@@ -22,6 +22,7 @@ import { join } from 'node:path';
 import { declaredArchonTracker } from '../../.shared/archon-tracker.ts';
 import type { QualifiedPr } from '../../.shared/forge.ts';
 import {
+  type FilingTarget,
   filedDiscoveries,
   parseRunDocument,
   type Queue,
@@ -120,9 +121,9 @@ function claimUndecided<R extends { ref: string }>(
  * Where this checkout files discoveries. For the Archon tracker, also writes the tasks
  * earlier passes filed in the project to `drain/tasks.json`, as the agent reads them.
  */
-async function filingTarget(repo: QualifiedPr['repo']): Promise<'github' | 'archon'> {
+async function filingTarget(repo: QualifiedPr['repo']): Promise<FilingTarget> {
   const tracker = declaredArchonTracker(process.cwd(), repo, process.env.ARCHON_TRACKER_BASE_URL);
-  if (tracker === null) return 'github';
+  if (tracker === null) return { tracker: 'github', archon_project_id: '' };
   const tasks = filedDiscoveries(await tracker.listProjectTasks()).map(({ key, refs, task }) => ({
     key,
     refs,
@@ -135,7 +136,7 @@ async function filingTarget(repo: QualifiedPr['repo']): Promise<'github' | 'arch
   const drain = join(artifactsDir(), 'drain');
   mkdirSync(drain, { recursive: true });
   writeFileSync(join(drain, 'tasks.json'), `${JSON.stringify(tasks, null, 2)}\n`);
-  return 'archon';
+  return { tracker: 'archon', archon_project_id: tracker.context.archonProjectId };
 }
 
 async function main(): Promise<void> {
@@ -152,7 +153,7 @@ async function main(): Promise<void> {
   const self = trimmed(process.env.WORKFLOW_ID);
   if (self === '') throw new Error('WORKFLOW_ID is not set; the engine supplies it to every exec node');
 
-  const tracker = await filingTarget(repo);
+  const target = await filingTarget(repo);
 
   const base = fetchDefaultBranch(repo);
   const documents = readRunDocuments();
@@ -213,7 +214,7 @@ async function main(): Promise<void> {
     path: queue.length === 0 ? 'idle' : 'decide',
     base,
     policy_defaults: POLICY_DEFAULTS,
-    tracker,
+    ...target,
   });
 }
 
