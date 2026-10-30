@@ -86,8 +86,14 @@ function recoveredTasks(filed: readonly FiledDiscovery[], decisions: readonly Ag
   return recovered;
 }
 
-/** Why a GitHub issue cannot track the decision, or null when it can: it must be open in this repository. */
-function trackingProblem(decision: AgentDecision & { outcome: 'track' }, repo: QualifiedPr['repo']): string | null {
+/**
+ * Why a GitHub issue cannot track the decision, or null when it can: it must be open in
+ * this repository, whose project does not file discoveries into the Archon tracker.
+ */
+function trackingProblem(decision: AgentDecision & { outcome: 'track' }, repo: QualifiedPr['repo'], toTracker: boolean): string | null {
+  if (toTracker) {
+    return `key ${decision.key} is tracked on a GitHub issue, but this project files discoveries into the Archon tracker`;
+  }
   if (!sameRepo(decision.issue.repo, repo)) {
     return `key ${decision.key} is tracked by an issue outside ${repo.host}/${repo.path}`;
   }
@@ -123,10 +129,7 @@ async function main(): Promise<void> {
   const recovered = tracker === null ? new Map<string, string>() : recoveredTasks(filed, decisions, problems);
   for (const decision of decisions) {
     if (decision.outcome !== 'track') continue;
-    const problem =
-      tracker === null
-        ? trackingProblem(decision, repo)
-        : `key ${decision.key} is tracked on a GitHub issue, but this project files discoveries into the Archon tracker`;
+    const problem = trackingProblem(decision, repo, tracker !== null);
     if (problem !== null) problems.push(problem);
   }
   const dropped = decisions.flatMap(decision =>

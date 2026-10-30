@@ -19,7 +19,8 @@
 
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { type ArchonTracker, declaredArchonTracker } from '../../.shared/archon-tracker.ts';
+import { declaredArchonTracker } from '../../.shared/archon-tracker.ts';
+import type { QualifiedPr } from '../../.shared/forge.ts';
 import {
   filedDiscoveries,
   parseRunDocument,
@@ -115,9 +116,14 @@ function claimUndecided<R extends { ref: string }>(
   return records.length === 0 ? null : { records, questions: document.questions ?? [] };
 }
 
-/** The tasks earlier passes filed in the project, as the agent reads them. */
-async function filedTasks(tracker: ArchonTracker) {
-  return filedDiscoveries(await tracker.listProjectTasks()).map(({ key, refs, task }) => ({
+/**
+ * Where this checkout files discoveries. For the Archon tracker, also writes the tasks
+ * earlier passes filed in the project to `drain/tasks.json`, as the agent reads them.
+ */
+async function filingTarget(repo: QualifiedPr['repo']): Promise<'github' | 'archon'> {
+  const tracker = declaredArchonTracker(process.cwd(), repo, process.env.ARCHON_TRACKER_BASE_URL);
+  if (tracker === null) return 'github';
+  const tasks = filedDiscoveries(await tracker.listProjectTasks()).map(({ key, refs, task }) => ({
     key,
     refs,
     url: tracker.taskUrl(task.id),
@@ -126,6 +132,10 @@ async function filedTasks(tracker: ArchonTracker) {
     archived: task.archived,
     description: task.description,
   }));
+  const drain = join(artifactsDir(), 'drain');
+  mkdirSync(drain, { recursive: true });
+  writeFileSync(join(drain, 'tasks.json'), `${JSON.stringify(tasks, null, 2)}\n`);
+  return 'archon';
 }
 
 async function main(): Promise<void> {
@@ -142,8 +152,7 @@ async function main(): Promise<void> {
   const self = trimmed(process.env.WORKFLOW_ID);
   if (self === '') throw new Error('WORKFLOW_ID is not set; the engine supplies it to every exec node');
 
-  const tracker = declaredArchonTracker(process.cwd(), repo, process.env.ARCHON_TRACKER_BASE_URL);
-  const filed = tracker === null ? null : await filedTasks(tracker);
+  const tracker = await filingTarget(repo);
 
   const base = fetchDefaultBranch(repo);
   const documents = readRunDocuments();
@@ -200,12 +209,11 @@ async function main(): Promise<void> {
   mkdirSync(drain, { recursive: true });
   const document: Queue = { base, runs: queue };
   writeFileSync(join(drain, 'queue.json'), `${JSON.stringify(document, null, 2)}\n`);
-  if (filed !== null) writeFileSync(join(drain, 'tasks.json'), `${JSON.stringify(filed, null, 2)}\n`);
   emit({
     path: queue.length === 0 ? 'idle' : 'decide',
     base,
     policy_defaults: POLICY_DEFAULTS,
-    tracker: tracker === null ? 'github' : 'archon',
+    tracker,
   });
 }
 
