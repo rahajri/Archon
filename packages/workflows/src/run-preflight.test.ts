@@ -855,6 +855,23 @@ describe('cross-provider fallback credentials', () => {
     ]);
   });
 
+  test('a mutating agent node does not require the fallback provider', async () => {
+    const { deps } = fixture();
+    const mutatingWorkflow = makeTestResolvedWorkflow({
+      name: 'mutating-fallback',
+      nodes: [{ id: 'edit', prompt: 'edit', provider: 'claude', mutates_checkout: true }],
+    });
+    deps.loadConfig.mockResolvedValue({
+      ...config,
+      assistant: 'codex',
+      crossProviderFallback: true,
+    });
+
+    const prepared = await prepareRunAiConfiguration(deps, mutatingWorkflow, '/p');
+
+    expect(prepared.requirements.map(r => r.provider)).toEqual(['claude']);
+  });
+
   test('the fallback provider is not required when it is already the primary provider', async () => {
     const { deps } = fixture();
     deps.loadConfig.mockResolvedValue({ ...config, crossProviderFallback: true });
