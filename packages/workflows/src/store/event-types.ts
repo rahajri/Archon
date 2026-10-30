@@ -1,3 +1,4 @@
+import type { ProviderFailure } from '@archon/provider-contract';
 import {
   DEFERRED_NODE_USAGE_EVENT_TYPE,
   type SerializedDeferredNodeUsageEvent,
@@ -10,6 +11,20 @@ import {
 } from '../run-budget';
 import { TERMINAL_RUN_EVENT_TYPES } from '../schemas/workflow-run';
 import { WORKTREE_SETUP_EVENT_TYPES } from '../schemas/worktree-setup';
+
+export const PROVIDER_FALLBACK_EVENT_TYPE = 'provider_fallback';
+
+/** A read-only node switched from its failed primary provider to the fallback provider. */
+export interface ProviderFallbackEventInput {
+  workflow_run_id: string;
+  step_name: string;
+  event_type: typeof PROVIDER_FALLBACK_EVENT_TYPE;
+  data: {
+    primary_provider: string;
+    fallback_provider: string;
+    failure_class: ProviderFailure['class'];
+  };
+}
 
 export const NODE_LIFECYCLE_EVENT_TYPES = [
   'node_started',
@@ -55,13 +70,14 @@ export const DURABLE_WORKFLOW_EVENT_TYPES = [
   RUN_BUDGET_WORK_UNIT_EVENT_TYPE,
   // A cross-provider switch is part of the run's execution history: execution
   // must not proceed to the fallback provider unless this audit row persists.
-  'provider_fallback',
+  PROVIDER_FALLBACK_EVENT_TYPE,
 ] as const;
 export type DurableWorkflowEventType = (typeof DURABLE_WORKFLOW_EVENT_TYPES)[number];
 export type DurableNodeEventInput =
   | NodeStateEventInput
   | SerializedDeferredNodeUsageEvent
-  | RunBudgetWorkUnitEvent;
+  | RunBudgetWorkUnitEvent
+  | ProviderFallbackEventInput;
 
 export const WORKFLOW_EVENT_TYPES = [
   'run_attention_changed',

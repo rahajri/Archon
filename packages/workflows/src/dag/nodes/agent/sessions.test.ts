@@ -41,6 +41,7 @@ import type { IWorkflowStore, PersistedNodeOutput, WorkflowNodeSessionKey } from
 import { waitCompletionEvents } from '../../../store';
 import { foldDagResumeSnapshot } from '../../../dag-resume-snapshot';
 import { ParentStatusReadError } from '../../../parent-status-read';
+import { NodeEventWriteError } from '../../../node-event-write';
 import type { WorkflowEventRow } from '../../../schemas/workflow-event';
 
 describe('executeDagWorkflow -- persist_session', () => {
@@ -3495,7 +3496,7 @@ describe('executeDagWorkflow -- read-only provider fallback', () => {
       await persist(event);
     });
 
-    await executeDagWorkflow(
+    const execute = executeDagWorkflow(
       dagOptions({
         deps: createMockDeps(store),
         platform: createMockPlatform(),
@@ -3525,6 +3526,13 @@ describe('executeDagWorkflow -- read-only provider fallback', () => {
       })
     );
 
+    // A durable-write rejection reaches run recovery instead of becoming a node outcome.
+    const error = await execute.catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(NodeEventWriteError);
+    expect((error as Error).message).toBe(
+      'Could not persist provider_fallback for review: fallback audit storage offline'
+    );
+
     expect(codexQuery).toHaveBeenCalledTimes(1);
     expect(claudeQuery).not.toHaveBeenCalled();
     expect(
@@ -3532,8 +3540,16 @@ describe('executeDagWorkflow -- read-only provider fallback', () => {
         ([event]) => event.event_type === 'provider_fallback'
       )
     ).toHaveLength(1);
-    expect(store.failWorkflowRun).toHaveBeenCalledTimes(1);
     expect(store.completeWorkflowRun).not.toHaveBeenCalled();
+
+    const failed = persistedEvents(store).filter(
+      event => event.event_type === 'node_failed' && event.step_name === 'review'
+    );
+    expect(failed).toHaveLength(1);
+    expect(failed[0]?.data).toMatchObject({
+      failure_kind: 'fatal',
+      provider_failure: { class: 'quota_exhausted' },
+    });
   });
 
   it('keeps the primary failure when the fallback cannot preserve safety capabilities', async () => {
@@ -5251,6 +5267,93 @@ describe('executeDagWorkflow -- read-only provider fallback', () => {
         total_tokens_in: 20,
         total_tokens_out: 2,
       });
+    } finally {
+      exec.mockRestore();
+    }
+  });
+
+  it('fails closed and does not fall back when the checkout cannot be observed after the primary attempt', async () => {
+    const codexQuery = mock<ReturnType<WorkflowDeps['getAgentProvider']>['sendQuery']>(
+      async function* () {
+        yield {
+          type: 'result',
+          isError: true,
+          failure: {
+            class: 'quota_exhausted',
+            evidence: 'Codex usage limit reached',
+          },
+        };
+      }
+    );
+
+    const claudeQuery = mock<ReturnType<WorkflowDeps['getAgentProvider']>['sendQuery']>(
+      async function* () {
+        yield { type: 'result', sessionId: 'must-not-run' };
+      }
+    );
+
+    mockGetAgentProviderDag.mockImplementation(provider => ({
+      sendQuery: provider === 'codex' ? codexQuery : claudeQuery,
+      checkCredential: async () => ({ state: 'not_checked' as const, source: 'native' as const }),
+      getType: () => provider,
+      getCapabilities: mockClaudeCapabilities,
+    }));
+
+    const originalExecFile = git.execFileAsync;
+    let statusCalls = 0;
+    // The first status read is the pre-attempt snapshot; the second is the
+    // observation that must prove the primary attempt left the checkout unchanged.
+    const exec = spyOn(git, 'execFileAsync').mockImplementation(async (cmd, args, options) => {
+      if (cmd === 'git' && args[0] === 'status') {
+        statusCalls++;
+        if (statusCalls === 2) {
+          throw new git.GitFailure('unclassified', 'pre-fallback checkout snapshot unavailable');
+        }
+      }
+      return originalExecFile(cmd, args, options);
+    });
+
+    try {
+      const store = createMockStore();
+
+      await executeDagWorkflow(
+        dagOptions({
+          deps: createMockDeps(store),
+          platform: createMockPlatform(),
+          cwd: fallbackTestDir,
+          config: {
+            ...minimalConfig,
+            crossProviderFallback: true,
+            assistant: 'claude',
+            assistants: {
+              claude: { model: 'claude-opus-5-5' },
+              codex: { model: 'gpt-6-astra' },
+            },
+          },
+          workflow: {
+            name: 'fallback-pre-snapshot-unavailable',
+            nodes: [
+              {
+                id: 'review',
+                kind: 'agent',
+                source: { kind: 'inline', prompt: 'Review safely' },
+                provider: 'codex',
+                mutates_checkout: false,
+              },
+            ],
+          },
+          workflowRun: makeWorkflowRun('fallback-pre-snapshot-unavailable-run'),
+        })
+      );
+
+      expect(statusCalls).toBe(2);
+      expect(codexQuery).toHaveBeenCalledTimes(1);
+      expect(claudeQuery).not.toHaveBeenCalled();
+      expect(
+        persistedEvents(store).filter(event => event.event_type === 'provider_fallback')
+      ).toHaveLength(0);
+      expect(store.completeWorkflowRun).not.toHaveBeenCalled();
+      expect(store.failWorkflowRun).toHaveBeenCalledTimes(1);
     } finally {
       exec.mockRestore();
     }
