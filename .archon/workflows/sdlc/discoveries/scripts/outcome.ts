@@ -35,6 +35,7 @@ import {
   type FilingTarget,
   filedDiscoveries,
   filingsOf,
+  mentionsDiscoveryMetadata,
   parseFilingTarget,
   parseRunDocument,
   type Question,
@@ -76,12 +77,16 @@ function newTask(decision: AgentDecision & { outcome: 'file' }, sha: string): Ne
 
 /**
  * The tracker task each filing recovers instead of creating one, by key: the task that
- * carries its key's marker or any of its refs. A filing two tasks match is a problem.
+ * carries its key's marker or any of its refs. A filing two tasks match is a problem, and
+ * so is a brief holding discovery metadata, which would make its task read as corrupt.
  */
 function recoveredTasks(filed: readonly FiledDiscovery[], decisions: readonly AgentDecision[], problems: string[]): Map<string, string> {
   const recovered = new Map<string, string>();
   for (const decision of decisions) {
     if (decision.outcome !== 'file') continue;
+    if (mentionsDiscoveryMetadata(decision.body)) {
+      problems.push(`key ${decision.key}'s body holds archon-discovery metadata, which would leave its task unreadable to a later pass`);
+    }
     const tasks = filingsOf(filed, decision);
     if (tasks.length > 1) {
       const ids = tasks.map(entry => entry.task.id).join(', ');

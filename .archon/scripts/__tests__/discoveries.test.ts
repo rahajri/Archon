@@ -4,7 +4,16 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSyn
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { trackTempRoots } from './temp-roots';
-import { AGENT_OUTCOMES, type AgentDecision, checkDecisions, parseRunDocument } from '../../workflows/sdlc/.shared/discoveries';
+import type { ArchonTask } from '../../workflows/sdlc/.shared/archon-tracker';
+import {
+  AGENT_OUTCOMES,
+  type AgentDecision,
+  checkDecisions,
+  FILING_TRACKERS,
+  filedDiscoveries,
+  parseFilingTarget,
+  parseRunDocument,
+} from '../../workflows/sdlc/.shared/discoveries';
 import { latestVerdictOf, relayedDiscoveries } from '../../workflows/sdlc/.shared/report';
 import { type GhIssue, gitCheckout, hostCli, PACK, packScriptRunner, PR, type ScriptRun } from './deliver-checks-harness';
 
@@ -91,11 +100,11 @@ describe("a run's discoveries", () => {
 
 const ISSUE = { repo: REPO, number: 7 };
 
-function decideSchema(): Record<string, unknown> {
+function outputSchema(node: 'facts' | 'decide'): Record<string, unknown> {
   const workflow = Bun.YAML.parse(readFileSync(join(PACK, 'discoveries/archon-discoveries.yaml'), 'utf8')) as {
     nodes: { id: string; output_format?: Record<string, unknown> }[];
   };
-  return workflow.nodes.find(node => node.id === 'decide')?.output_format ?? {};
+  return workflow.nodes.find(entry => entry.id === node)?.output_format ?? {};
 }
 
 describe("a drained run's document", () => {
@@ -126,10 +135,74 @@ describe("a drained run's document", () => {
   });
 
   test("the decide node's output schema names exactly the agent's outcomes", () => {
-    const schema = decideSchema();
+    const schema = outputSchema('decide');
     const items = (schema.properties as { decisions: { items: { anyOf: { properties: { outcome: { enum: string[] } } }[] } } })
       .decisions.items.anyOf;
     expect(items.map(branch => branch.properties.outcome.enum).flat().sort()).toEqual([...AGENT_OUTCOMES].sort());
+  });
+
+  test("the facts node's tracker enum names exactly the trackers a filing target accepts", () => {
+    const declared = (outputSchema('facts').properties as { tracker: { enum: string[] } }).tracker.enum;
+    expect([...declared].sort()).toEqual([...FILING_TRACKERS].sort());
+    for (const tracker of declared) {
+      expect(parseFilingTarget(tracker, tracker === 'github' ? '' : 'project')).toMatchObject({ tracker });
+    }
+    expect(() => parseFilingTarget('jira', 'project')).toThrow('is not a filing target');
+  });
+});
+
+describe('the tasks a pass filed', () => {
+  const task = (description: string | null, id = 'task-7'): ArchonTask => ({
+    id,
+    project_id: 'p',
+    title: 'A defect',
+    description,
+    status: 'todo',
+    archived: false,
+  });
+  const MARKER = '<!-- archon-discovery earlier-key -->';
+  const REFS = `<!-- archon-discovery-refs ["${RUN}:review#0"] -->`;
+
+  test('reads a canonical filing, a marker-only one from before tasks recorded refs, and skips tasks with no metadata', () => {
+    const tasks = [
+      task([MARKER, REFS, 'The brief.'].join('\n'), 'task-1'),
+      task([MARKER, REFS, 'The brief.'].join('\r\n'), 'task-2'),
+      task([MARKER, 'The brief.'].join('\n'), 'task-3'),
+      task(MARKER, 'task-4'),
+      task('A task a person wrote about the archon-discoveries workflow.', 'task-5'),
+      task(null, 'task-6'),
+    ];
+    expect(filedDiscoveries(tasks).map(({ key, refs, task: { id } }) => ({ id, key, refs }))).toEqual([
+      { id: 'task-1', key: 'earlier-key', refs: [`${RUN}:review#0`] },
+      { id: 'task-2', key: 'earlier-key', refs: [`${RUN}:review#0`] },
+      { id: 'task-3', key: 'earlier-key', refs: [] },
+      { id: 'task-4', key: 'earlier-key', refs: [] },
+    ]);
+  });
+
+  test.each([
+    ['a leading space before the marker', [` ${MARKER}`, REFS], 'marker line is not canonical'],
+    ['a marker without its space', ['<!--archon-discovery earlier-key -->', REFS], 'marker line is not canonical'],
+    ['a marker in another case', ['<!-- Archon-Discovery earlier-key -->'], 'marker line is not canonical'],
+    ['a blank line before the marker', ['', MARKER, REFS], 'marker line is not canonical'],
+    ['prose before the marker', ['Filed by hand.', MARKER], 'marker line is not canonical'],
+    ['a marker that does not close', ['<!-- archon-discovery earlier-key'], 'marker line is not canonical'],
+    ['a refs line where the marker belongs', [REFS], 'marker line is not canonical'],
+    ['a key that is not a decision key', ['<!-- archon-discovery Earlier_Key -->', REFS], 'marker does not carry a decision key'],
+    ['a key with trailing space', ['<!-- archon-discovery earlier-key  -->'], 'marker does not carry a decision key'],
+    ['a blank line before the refs line', [MARKER, '', REFS], 'metadata after its header'],
+    ['a refs line with a leading space', [MARKER, ` ${REFS}`], 'refs line is not canonical'],
+    ['a refs line that does not close', [MARKER, `<!-- archon-discovery-refs ["${RUN}:review#0"]`], 'refs line is not canonical'],
+    ['a refs line that is not JSON', [MARKER, `<!-- archon-discovery-refs [${RUN}:review#0 -->`], 'not a list of qualified refs'],
+    ['a refs line that is not a list', [MARKER, '<!-- archon-discovery-refs {"ref":1} -->'], 'not a list of qualified refs'],
+    ['a refs line that lists no refs', [MARKER, '<!-- archon-discovery-refs [] -->'], 'not a list of qualified refs'],
+    ['a refs line with a ref that is not qualified', [MARKER, '<!-- archon-discovery-refs ["review#0"] -->'], 'not a list of qualified refs'],
+    ['a refs line with a ref that is not a string', [MARKER, `<!-- archon-discovery-refs ["${RUN}:review#0", 7] -->`], 'not a list of qualified refs'],
+    ['a second marker in the brief', [MARKER, REFS, 'The brief.', '<!-- archon-discovery other-key -->'], 'metadata after its header'],
+  ])('refuses %s rather than reading the task as no filing', (_case, lines, why) => {
+    expect(() => filedDiscoveries([task([...lines, 'The brief.'].join('\n'))])).toThrow(
+      new RegExp(`^task task-7 carries corrupt archon-discovery metadata: .*${why}`)
+    );
   });
 });
 
@@ -444,9 +517,15 @@ interface TrackerState {
 
 /**
  * A fake tracker behind the script's fetch, holding its tasks and every request in one
- * file. Like the tracker, it lists archived tasks only when asked to.
+ * file. Like the tracker, it lists archived tasks only when asked to, and reads one task
+ * back by its id.
  */
-function fakeTracker(tasks: Record<string, unknown>[] = [], down = false): { path: string; preload: string; read: () => TrackerState } {
+function fakeTracker(
+  tasks: Record<string, unknown>[] = [],
+  down = false,
+  /** JavaScript for how the tracker stores a created task; it answers the create with the task as sent. */
+  stores = 'task => task'
+): { path: string; preload: string; read: () => TrackerState } {
   const path = join(track(mkdtempSync(join(tmpdir(), 'archon-discoveries-tracker-'))), 'tracker.json');
   writeFileSync(path, JSON.stringify({ tasks, requests: [], down }));
   const preload = `
@@ -468,8 +547,11 @@ function fakeTracker(tasks: Record<string, unknown>[] = [], down = false): { pat
       );
     } else if (method === 'POST' && url.pathname === '/api/tasks') {
       const task = { id: 'task-' + String(state.tasks.length + 1), status: 'todo', description: null, archived: false, ...body };
-      state.tasks.push(task);
+      state.tasks.push((${stores})({ ...task }));
       response = Response.json({ message: 'Task created successfully', task });
+    } else if (method === 'GET' && url.pathname.startsWith('/api/tasks/')) {
+      const task = state.tasks.find(task => url.pathname === '/api/tasks/' + task.id);
+      response = task === undefined ? new Response('{"detail":"Task not found"}', { status: 404 }) : Response.json(task);
     } else {
       response = new Response('not found', { status: 404 });
     }
@@ -529,7 +611,12 @@ describe('filing discoveries into the Archon tracker', () => {
     expect(JSON.parse(readFileSync(join(facts.artifacts, 'drain/tasks.json'), 'utf8'))).toEqual([]);
     expect(ok(outcome).written).toEqual([{ key: 'new-defect', outcome: 'file', url: `${TRACKER}/api/tasks/task-1` }]);
     const { requests } = tracker.read();
-    expect(requests.map(request => `${request.method} ${request.url}`)).toEqual([LIST, LIST, `POST ${TRACKER}/api/tasks`]);
+    expect(requests.map(request => `${request.method} ${request.url}`)).toEqual([
+      LIST,
+      LIST,
+      `POST ${TRACKER}/api/tasks`,
+      `GET ${TRACKER}/api/tasks/task-1`,
+    ]);
     expect(requests[2]?.body).toEqual({
       title: 'A new defect',
       description: expect.stringMatching(
@@ -603,11 +690,17 @@ describe('filing discoveries into the Archon tracker', () => {
     expect(tracker.read().tasks.map(task => task.id)).toEqual(['task-1']);
   }, 60_000);
 
+  const REFS = `<!-- archon-discovery-refs ["${RUN}:review#0"] -->`;
   test.each([
+    ['the marker has a leading space', [' <!-- archon-discovery earlier-key -->', REFS]],
+    ['the marker lacks its space', ['<!--archon-discovery earlier-key -->', REFS]],
+    ['a blank line precedes the metadata', ['', '<!-- archon-discovery earlier-key -->', REFS]],
     ['the marker line does not close', ['<!-- archon-discovery earlier-key']],
+    ['the key is not a decision key', ['<!-- archon-discovery Earlier_Key -->', REFS]],
     ['the refs line does not close', ['<!-- archon-discovery earlier-key -->', `<!-- archon-discovery-refs ["${RUN}:review#0"]`]],
     ['the refs line is not JSON', ['<!-- archon-discovery earlier-key -->', `<!-- archon-discovery-refs [${RUN}:review#0 -->`]],
-    ['the refs line is not a list of refs', ['<!-- archon-discovery earlier-key -->', '<!-- archon-discovery-refs {"ref":1} -->']],
+    ['a ref is not qualified', ['<!-- archon-discovery earlier-key -->', '<!-- archon-discovery-refs ["review#0"] -->']],
+    ['a ref is not a string', ['<!-- archon-discovery earlier-key -->', '<!-- archon-discovery-refs [7] -->']],
     ['the refs line lists no refs', ['<!-- archon-discovery earlier-key -->', '<!-- archon-discovery-refs [] -->']],
   ])('a filed task whose metadata is corrupt (%s) refuses the pass, and no second task is created', (_case, lines) => {
     const at = install();
@@ -620,12 +713,46 @@ describe('filing discoveries into the Archon tracker', () => {
 
     for (const run of [facts, outcome]) {
       expect(run.code).toBe(1);
-      expect(run.stderr).toMatch(/task task-7 carries a (corrupt|discovery)/);
+      expect(run.stderr).toContain('task task-7 carries corrupt archon-discovery metadata');
       expect([run.createdIssues, issueCreates(run)]).toEqual([[], []]);
     }
     expect(tracker.read().requests.map(request => request.method)).toEqual(['GET', 'GET']);
     expect(tracker.read().tasks).toEqual([corrupt]);
     expect(state(at, `discoveries/runs/${RUN}`)).toBeNull();
+  }, 60_000);
+
+  test.each([
+    ['strips HTML comments', "task => ({ ...task, description: task.description.replace(/<!--[^]*?-->\\n?/g, '') })", 'description'],
+    ['truncates the description', 'task => ({ ...task, description: task.description.slice(0, 30) })', 'description'],
+    ['alters the title', "task => ({ ...task, title: task.title + ' (imported)' })", 'title'],
+    ['alters the status', "task => ({ ...task, status: 'backlog' })", 'status'],
+  ])('a tracker that %s on create fails the filing instead of reporting it', (_case, stores, field) => {
+    const at = install();
+    projectFile(at, 'archon');
+    const tracker = fakeTracker([], false, stores);
+    runArtifacts(at.outputRoot, RUN, { verdict: [record('new')] });
+    const { outcome } = decide(at, pass('pass-1', tracker), fileIt('new-defect'));
+
+    expect(outcome.code).toBe(1);
+    expect(outcome.stderr).toContain(`the tracker created task task-1 but reads back a different ${field}`);
+    expect(outcome.stdout).toBe('');
+    expect(tracker.read().requests.map(request => request.method)).toEqual(['GET', 'GET', 'POST', 'GET']);
+    expect([outcome.createdIssues, issueCreates(outcome)]).toEqual([[], []]);
+    expect(state(at, `discoveries/runs/${RUN}`)).toMatchObject({ claim: { run_id: 'pass-1' } });
+  }, 60_000);
+
+  test('refuses before any write a brief holding discovery metadata, which would leave its task unreadable', () => {
+    const at = install();
+    projectFile(at, 'archon');
+    const tracker = fakeTracker();
+    runArtifacts(at.outputRoot, RUN, { verdict: [record('new')] });
+    const { outcome } = decide(at, pass('pass-1', tracker), refs => [
+      { outcome: 'file', key: 'new-defect', refs, title: 'A defect', body: 'Quotes <!--archon-discovery old -->.', reason: 'real' },
+    ]);
+
+    expect(outcome.code).toBe(1);
+    expect(outcome.stderr).toContain("key new-defect's body holds archon-discovery metadata");
+    expect(tracker.read().requests.map(request => request.method)).toEqual(['GET', 'GET']);
   }, 60_000);
 
   const OTHER_PROJECT = '0b5c5f5e-8f63-4c55-9a43-3a3c1f0b9e21';

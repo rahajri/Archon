@@ -184,10 +184,26 @@ export type FilingTarget =
   | { readonly tracker: 'github'; readonly archon_project_id: '' }
   | { readonly tracker: 'archon'; readonly archon_project_id: string };
 
+/**
+ * Each tracker a target can name, with the target an Archon project id makes of it. The
+ * mapped type admits exactly `FilingTarget`'s trackers, and the workflow's tracker enum
+ * is held to these keys by `discoveries.test.ts`.
+ */
+const FILING_TARGETS: { readonly [T in FilingTarget['tracker']]: (archonProjectId: string) => FilingTarget | null } = {
+  github: id => (id === '' ? { tracker: 'github', archon_project_id: '' } : null),
+  archon: id => (id === '' ? null : { tracker: 'archon', archon_project_id: id }),
+};
+
+export const FILING_TRACKERS: readonly string[] = Object.keys(FILING_TARGETS);
+
+function isFilingTracker(tracker: string): tracker is FilingTarget['tracker'] {
+  return Object.hasOwn(FILING_TARGETS, tracker);
+}
+
 export function parseFilingTarget(tracker: string, archonProjectId: string): FilingTarget {
-  if (tracker === 'github' && archonProjectId === '') return { tracker, archon_project_id: '' };
-  if (tracker === 'archon' && archonProjectId !== '') return { tracker, archon_project_id: archonProjectId };
-  throw new Error(`"${tracker}" with Archon project "${archonProjectId}" is not a filing target`);
+  const target = isFilingTracker(tracker) ? FILING_TARGETS[tracker](archonProjectId) : null;
+  if (target === null) throw new Error(`"${tracker}" with Archon project "${archonProjectId}" is not a filing target`);
+  return target;
 }
 
 export function describeFilingTarget(target: FilingTarget): string {
@@ -197,6 +213,17 @@ export function describeFilingTarget(target: FilingTarget): string {
 const MARKER_OPEN = '<!-- archon-discovery ';
 const REFS_OPEN = '<!-- archon-discovery-refs ';
 const COMMENT_CLOSE = ' -->';
+/**
+ * Text that opens an archon-discovery comment in any spacing or case. A description that
+ * holds one anywhere but the canonical header is corrupt metadata, never an unrelated
+ * task: read as no filing, its discovery would be filed a second time.
+ */
+const METADATA = /<!--\s*archon-discovery/i;
+
+/** Whether text would read as discovery metadata on a tracker task. */
+export function mentionsDiscoveryMetadata(text: string): boolean {
+  return METADATA.test(text);
+}
 
 /** The marker on a filed issue's or task's first line, and on an evidence comment's. */
 export function discoveryMarker(key: string): string {
@@ -217,42 +244,53 @@ export interface FiledDiscovery {
   readonly task: ArchonTask;
 }
 
-/**
- * The payload of a metadata comment line opening with `open`, null when the line is not
- * one. A line that opens like one but does not close is corrupt, never "not one": read as
- * absent, a task's marker or refs would stop matching and the pass would file it again.
- */
-function metadata(line: string, open: string, task: ArchonTask): string | null {
-  if (!line.startsWith(open.trimEnd())) return null;
-  if (!line.startsWith(open) || !line.endsWith(COMMENT_CLOSE)) {
-    throw new Error(`task ${task.id} carries a corrupt ${open.trim()} line`);
-  }
+function corrupt(task: ArchonTask, why: string): never {
+  throw new Error(`task ${task.id} carries corrupt archon-discovery metadata: ${why}`);
+}
+
+/** The payload of a canonical metadata line opening with `open`. */
+function payload(task: ArchonTask, line: string, open: string, what: string): string {
+  if (!line.startsWith(open) || !line.endsWith(COMMENT_CLOSE)) corrupt(task, `its ${what} line is not canonical`);
   return line.slice(open.length, -COMMENT_CLOSE.length);
 }
 
+function refsOf(task: ArchonTask, line: string): string[] {
+  const refs = payload(task, line, REFS_OPEN, 'refs');
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(refs);
+  } catch {
+    parsed = undefined;
+  }
+  if (!Array.isArray(parsed) || parsed.length === 0 || !parsed.every(isQualifiedRef)) {
+    corrupt(task, 'its refs line is not a list of qualified refs');
+  }
+  return parsed;
+}
+
 /**
- * The tasks a discoveries pass filed, by the marker on their description's first line.
- * A task whose marker or refs line is corrupt refuses the read rather than matching nothing.
+ * The filing a task's description records, or null when it holds no discovery metadata.
+ * The canonical header is the marker on the first line, then optionally the refs line;
+ * a marker-only task was filed before tasks recorded their refs.
+ */
+function filedDiscovery(task: ArchonTask): FiledDiscovery | null {
+  const description = task.description ?? '';
+  if (!METADATA.test(description)) return null;
+  const [first = '', second = '', ...rest] = description.split(/\r?\n/);
+  const key = payload(task, first, MARKER_OPEN, 'marker');
+  if (!isKey(key)) corrupt(task, 'its marker does not carry a decision key');
+  const refs = METADATA.test(second) ? refsOf(task, second) : [];
+  const brief = refs.length === 0 ? [second, ...rest] : rest;
+  if (brief.some(line => METADATA.test(line))) corrupt(task, 'it carries discovery metadata after its header');
+  return { key, refs, task };
+}
+
+/**
+ * The tasks a discoveries pass filed. A task whose discovery metadata is corrupt refuses
+ * the read rather than matching nothing.
  */
 export function filedDiscoveries(tasks: readonly ArchonTask[]): FiledDiscovery[] {
-  return tasks.flatMap(task => {
-    const [first = '', second = ''] = (task.description ?? '').split(/\r?\n/, 2);
-    const key = metadata(first, MARKER_OPEN, task);
-    if (key === null) return [];
-    if (!isKey(key)) throw new Error(`task ${task.id} carries a discovery marker whose key is not a decision key`);
-    const refs = metadata(second, REFS_OPEN, task);
-    if (refs === null) return [{ key, refs: [], task }];
-    let parsed: unknown;
-    try {
-      parsed = JSON.parse(refs);
-    } catch {
-      parsed = undefined;
-    }
-    if (!Array.isArray(parsed) || parsed.length === 0 || !parsed.every(isQualifiedRef)) {
-      throw new Error(`task ${task.id} carries a discovery refs line that is not a list of refs`);
-    }
-    return [{ key, refs: parsed, task }];
-  });
+  return tasks.flatMap(task => filedDiscovery(task) ?? []);
 }
 
 /**
