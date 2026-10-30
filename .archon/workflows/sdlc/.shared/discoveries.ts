@@ -17,6 +17,7 @@
 import { isDeepStrictEqual } from 'node:util';
 import { type ArchonTask, type ArchonTracker, trackerBaseUrl } from './archon-tracker.ts';
 import type { QualifiedPr } from './forge.ts';
+import type { TrackerKind } from './project-context.ts';
 import type { fetchDefaultBranch } from './remote.ts';
 import type { DiscoveryRecord } from './report.ts';
 import { isObject } from './typed.ts';
@@ -181,9 +182,12 @@ export function checkDecisions(queued: readonly string[], decisions: readonly Ag
  * instance, named by its normalized base URL. `facts` chooses it and carries every field
  * on its output, so the outcome, a resumed one too, files where the agent searched.
  */
-export type FilingTarget =
-  | { readonly tracker: 'github'; readonly archon_project_id: ''; readonly tracker_base_url: '' }
-  | { readonly tracker: 'archon'; readonly archon_project_id: string; readonly tracker_base_url: string };
+export type FilingTarget = { readonly [T in TrackerKind]: { readonly tracker: T } & FilingFields[T] }[TrackerKind];
+
+interface FilingFields {
+  readonly github: { readonly archon_project_id: ''; readonly tracker_base_url: '' };
+  readonly archon: { readonly archon_project_id: string; readonly tracker_base_url: string };
+}
 
 /** A target's fields as the workflow carries them: one string each, unvalidated. */
 export type FilingTargetFields = { readonly [F in keyof FilingTarget]: string };
@@ -199,11 +203,11 @@ function isTrackerBaseUrl(value: string): boolean {
 
 /**
  * Each tracker a target can name, with the target its other fields make of it. Every
- * `FilingTarget` is built here. The mapped type admits exactly `FilingTarget`'s trackers,
+ * `FilingTarget` is built here. The mapped type requires an entry for every `TrackerKind`,
  * and the workflow's tracker enum and carried fields are held to these by
  * `discoveries.test.ts`.
  */
-const FILING_TARGETS: { readonly [T in FilingTarget['tracker']]: (fields: FilingTargetFields) => FilingTarget | null } = {
+const FILING_TARGETS: { readonly [T in TrackerKind]: (fields: FilingTargetFields) => FilingTarget | null } = {
   github: ({ archon_project_id, tracker_base_url }) =>
     archon_project_id === '' && tracker_base_url === '' ? { tracker: 'github', archon_project_id: '', tracker_base_url: '' } : null,
   archon: ({ archon_project_id, tracker_base_url }) =>
@@ -212,7 +216,7 @@ const FILING_TARGETS: { readonly [T in FilingTarget['tracker']]: (fields: Filing
 
 export const FILING_TRACKERS: readonly string[] = Object.keys(FILING_TARGETS);
 
-function isFilingTracker(tracker: string): tracker is FilingTarget['tracker'] {
+function isFilingTracker(tracker: string): tracker is TrackerKind {
   return Object.hasOwn(FILING_TARGETS, tracker);
 }
 
@@ -242,9 +246,14 @@ export function sameFilingTarget(a: FilingTarget, b: FilingTarget): boolean {
 }
 
 export function describeFilingTarget(target: FilingTarget): string {
-  return target.tracker === 'github'
-    ? 'GitHub issues'
-    : `Archon tracker project ${target.archon_project_id} at ${target.tracker_base_url}`;
+  switch (target.tracker) {
+    case 'github':
+      return 'GitHub issues';
+    case 'archon':
+      return `Archon tracker project ${target.archon_project_id} at ${target.tracker_base_url}`;
+    default:
+      return target satisfies never;
+  }
 }
 
 const MARKER_OPEN = '<!-- archon-discovery ';

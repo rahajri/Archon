@@ -244,6 +244,7 @@ describe('declaredArchonTracker', () => {
     ['no base URL', ARCHON_PROJECT, undefined, /is not set/],
     ['a malformed base URL', ARCHON_PROJECT, 'tracker', /is not a URL/],
     ['a base URL ending in an empty query', ARCHON_PROJECT, `${BASE}?`, /must not carry/],
+    ['a tracker other than archon or github', ARCHON_PROJECT.replace('primary: archon', 'primary: jira'), BASE, /tracker\.primary/],
   ])('refuses %s before sending anything', (_case, yaml, base, why) => {
     const { fetch, sent } = fakeFetch();
     expect(() => declaredArchonTracker(checkout(yaml), BAREA, base, fetch)).toThrow(why);

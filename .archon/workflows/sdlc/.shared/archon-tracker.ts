@@ -14,7 +14,7 @@
  */
 
 import { type QualifiedPr, sameRepo } from './forge.ts';
-import { type ArchonProjectContext, PROJECT_FILE, readProjectContext } from './project-context.ts';
+import { type ArchonProjectContext, PROJECT_FILE, type ProjectContext, readProjectContext } from './project-context.ts';
 import { isObject } from './typed.ts';
 
 /** The fields of a task this pack reads; the tracker returns more. */
@@ -90,7 +90,15 @@ export function declaredArchonTracker(
   fetchImpl: typeof fetch = fetch
 ): ArchonTracker | null {
   const context = readProjectContext(checkout);
-  if (context === null || context.trackerPrimary !== 'archon') return null;
+  if (context === null) return null;
+  switch (context.trackerPrimary) {
+    case 'github':
+      return null;
+    case 'archon':
+      break;
+    default:
+      throw new ArchonTrackerError(`No route for tracker ${(context satisfies never as ProjectContext).trackerPrimary}.`, null);
+  }
   if (!sameRepo(context.githubRepo, repo)) {
     const declared = `${context.githubRepo.host}/${context.githubRepo.path}`;
     throw new ArchonTrackerError(

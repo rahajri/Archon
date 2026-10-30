@@ -33,6 +33,13 @@ export type ProjectContext =
   | ArchonProjectContext
   | (ProjectContextBase & { readonly trackerPrimary: 'github'; readonly archonProjectId: string | null });
 
+/**
+ * The trackers a project can keep its work in. Each consumer that routes on one — the
+ * tracker a checkout declares, the filing target a pass carries — is keyed or switched
+ * exhaustively on this type, so a new kind fails to compile until each routes it.
+ */
+export type TrackerKind = ProjectContext['trackerPrimary'];
+
 export class ProjectContextError extends Error {
   constructor(message: string, options?: ErrorOptions) {
     super(message, options);
