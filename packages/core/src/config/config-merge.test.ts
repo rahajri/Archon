@@ -61,6 +61,20 @@ defaults:
       expect(config.crossProviderFallback).toBe(true);
     });
 
+    test('ignores a cross-provider fallback opt-in in repository config', async () => {
+      mockFsReadFile.mockImplementation(async (path: string) => {
+        if (path.replace(/\\/g, '/').includes('/test/repo/.archon/config.yaml')) {
+          return 'assistant: codex\ncrossProviderFallback: true\n';
+        }
+        return 'assistant: claude\n';
+      });
+
+      const config = await loadConfig('/test/repo');
+
+      expect(config.assistant).toBe('codex');
+      expect(config.crossProviderFallback).toBeUndefined();
+    });
+
     test('rejects a non-boolean cross-provider fallback opt-in', async () => {
       mockFsReadFile.mockResolvedValue('crossProviderFallback: "true"\n');
 
