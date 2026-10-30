@@ -855,11 +855,11 @@ describe('cross-provider fallback credentials', () => {
     ]);
   });
 
-  test('a mutating agent node does not require the fallback provider', async () => {
+  test('a default mutating agent node does not require the fallback provider', async () => {
     const { deps } = fixture();
     const mutatingWorkflow = makeTestResolvedWorkflow({
       name: 'mutating-fallback',
-      nodes: [{ id: 'edit', prompt: 'edit', provider: 'claude', mutates_checkout: true }],
+      nodes: [{ id: 'edit', prompt: 'edit', provider: 'claude' }],
     });
     deps.loadConfig.mockResolvedValue({
       ...config,
