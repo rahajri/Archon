@@ -155,6 +155,38 @@ has an empty `GH_TOKEN=` line to remove. The operations still refuse on their ow
 Run `archon workflow run archon-forge-check` from a checkout to see the same check's
 result without starting delivery.
 
+## Archon task tracker
+
+A project can keep its work items as tasks in an Archon task tracker instead of
+forge issues. The tracker is a separate service from the forge, so selecting it
+changes no issue read or write above. The project declares it in
+`.factory/project.yaml` at the repository root:
+
+```yaml
+project:
+  name: <project name>
+  archon_project_id: <tracker project UUID>
+  github_repo: <owner>/<name>
+tracker:
+  primary: archon # or github
+  create_github_issue_on_ready: true
+```
+
+[`.shared/project-context.ts`](.shared/project-context.ts) reads that file into a
+`ProjectContext`. `archon_project_id` names the project in the tracker; it is not the
+engine's codebase for the checkout, and it is never derived from a repository name.
+`create_github_issue_on_ready` is recorded as project policy; nothing acts on it yet.
+
+[`.shared/archon-tracker.ts`](.shared/archon-tracker.ts) creates, reads, lists and
+updates tasks in that project, and sends the context's `archon_project_id` as every
+created task's `project_id`. It reaches the tracker at `ARCHON_TRACKER_BASE_URL`, set
+in the environment Archon runs with, for example `ARCHON_TRACKER_BASE_URL=http://127.0.0.1:8181`
+in `~/.archon/.env`. There is no default. Building the tracker refuses, before any
+request, a checkout with no project file, a file that is not valid YAML or misses a
+field, a project whose `tracker.primary` is not `archon` or that has no
+`archon_project_id`, and an unset or non-http(s) base URL. A repository without the
+file is untouched unless something asks it for an Archon task.
+
 ## Public writes belong to a script
 
 An agent judges and authors; one node owns the public writes and
