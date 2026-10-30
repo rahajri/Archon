@@ -20,6 +20,7 @@ import type {
   TierName,
 } from './model-validation';
 import type { AgentNode, DagNode, EffortLevel } from './schemas';
+import type { WorkflowConfig } from './deps';
 import { readComposedMeta } from './compiled-command';
 
 /**
@@ -302,6 +303,29 @@ export function assistantModelDefaults(config: {
     if (typeof model === 'string') models[provider] = model;
   }
   return models;
+}
+
+/**
+ * The provider a node may fall back to, judged on what is known before the run starts.
+ * Dispatch adds the runtime conditions (session, resume source, failure class); credential
+ * preflight prepares a credential for every node this admits, so the two cannot disagree.
+ */
+export function crossProviderFallbackTarget(
+  config: Pick<WorkflowConfig, 'assistant' | 'crossProviderFallback'>,
+  node: DagNode,
+  primaryProvider: string
+): string | undefined {
+  const fallbackProvider = config.assistant;
+  if (
+    config.crossProviderFallback !== true ||
+    fallbackProvider === undefined ||
+    node.kind !== 'agent' ||
+    node.mutates_checkout !== false ||
+    fallbackProvider === primaryProvider
+  ) {
+    return undefined;
+  }
+  return fallbackProvider;
 }
 
 /**

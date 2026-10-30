@@ -14,7 +14,10 @@ import {
 import { spellWorkflowCommand } from '../../../deps';
 import { readNodeArtifacts, writeNodeArtifactsListing } from '../../../artifacts-index';
 import { readComposedMeta } from '../../../compiled-command';
-import { crossProviderFallbackNode } from '../../../node-model-resolution';
+import {
+  crossProviderFallbackNode,
+  crossProviderFallbackTarget,
+} from '../../../node-model-resolution';
 import { safeSendMessage } from '../../../platform-messages';
 import { getLog } from '../../log';
 import { aiConfigTextResolver } from '../../references';
@@ -493,15 +496,12 @@ async function withReadOnlyFallback(
   guard: CheckoutGuard
 ): Promise<FallbackOutcome> {
   const { resumeSessionId, usesPersistedScope } = run;
-  const fallbackProvider = ctx.config.assistant;
+  const fallbackProvider = crossProviderFallbackTarget(ctx.config, node, provider);
   const failureClass = primary.state === 'failed' ? primary.providerFailure?.class : undefined;
   const eligible =
-    ctx.config.crossProviderFallback === true &&
-    node.mutates_checkout === false &&
     resumeSessionId === undefined &&
     !usesPersistedScope &&
     ctx.namedResumeSourceIds?.has(node.id) !== true &&
-    fallbackProvider !== provider &&
     failureClass !== undefined &&
     FALLBACK_CLASSES.has(failureClass);
   if (!eligible || fallbackProvider === undefined || failureClass === undefined) {

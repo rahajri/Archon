@@ -22,6 +22,7 @@ import { resolvedBodyNodes } from './graph-plan';
 import {
   assistantModelDefaults,
   crossProviderFallbackNode,
+  crossProviderFallbackTarget,
   resolveNodeModel,
   resolveNodeModelScope,
   resolveWorkflowModelScope,
@@ -395,9 +396,6 @@ export function collectRunCredentialRequirements(
     });
     return provider;
   };
-  // A fallback provider runs with the credential prepared here, never with an ambient one.
-  const fallbackProvider =
-    prepared.config.crossProviderFallback === true ? prepared.config.assistant : undefined;
   const visit = (nodes: readonly DagNode[], scope: WorkflowModelScope): void => {
     for (const node of nodes) {
       const invocation = providerInvocation(node);
@@ -421,12 +419,9 @@ export function collectRunCredentialRequirements(
       }
       const invoked = invocation.node;
       const provider = requireNodeProvider(invoked, scope);
-      if (
-        invoked.kind === 'agent' &&
-        invoked.mutates_checkout === false &&
-        fallbackProvider !== undefined &&
-        fallbackProvider !== provider
-      ) {
+      // A fallback provider runs with the credential prepared here, never with an ambient one.
+      const fallbackProvider = crossProviderFallbackTarget(prepared.config, invoked, provider);
+      if (invoked.kind === 'agent' && fallbackProvider !== undefined) {
         requireNodeProvider(crossProviderFallbackNode(invoked, fallbackProvider), scope);
       }
     }
