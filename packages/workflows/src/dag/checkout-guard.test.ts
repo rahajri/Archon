@@ -126,6 +126,17 @@ describe('executeDagWorkflow -- node-level mutates_checkout: false (#2771)', () 
     expect(error).toContain('stray.txt');
   });
 
+  it('detects a commit-and-clean mutation through HEAD', async () => {
+    await initRepo(testDir);
+    const deps = await runBashNode(
+      'echo committed > committed.txt && git add committed.txt && git -c user.email=t@t -c user.name=t commit -qm guarded-change',
+      true
+    );
+    const error = nodeFailedError(deps, 'guarded');
+    expect(error).toContain('mutates_checkout: false');
+    expect(error).toContain('<HEAD>');
+  });
+
   it('detects a same-size edit to an already-dirty tracked file', async () => {
     await writeFile(join(testDir, 'tracked.txt'), 'clean');
     await initRepo(testDir);
@@ -219,7 +230,7 @@ describe('executeDagWorkflow -- node-level mutates_checkout: false (#2771)', () 
     const after = await snapshotCheckout(testDir, []);
     expect(before).toBeDefined();
     expect(after).toBeDefined();
-    expect(after?.get('untracked.txt')).not.toEqual(before?.get('untracked.txt'));
+    expect(after?.paths.get('untracked.txt')).not.toEqual(before?.paths.get('untracked.txt'));
   });
 
   it.each(['artifacts', 'state', 'logs'])(
@@ -237,7 +248,7 @@ describe('executeDagWorkflow -- node-level mutates_checkout: false (#2771)', () 
         join(parent, 'logs')
       );
       const before = await snapshotCheckout(parent, excludes);
-      expect([...(before?.keys() ?? [])]).toEqual(['untracked/user.txt']);
+      expect([...(before?.paths.keys() ?? [])]).toEqual(['untracked/user.txt']);
       await writeFile(join(engineRoot, 'output'), 'after');
       expect(await snapshotCheckout(parent, excludes)).toEqual(before);
       await writeFile(join(parent, 'user.txt'), 'after');
@@ -259,12 +270,14 @@ describe('executeDagWorkflow -- node-level mutates_checkout: false (#2771)', () 
     for (const name of names) await writeFile(join(testDir, name), name);
     const before = await snapshotCheckout(testDir, []);
     expect(before).toBeDefined();
-    expect([...(before?.keys() ?? [])].sort()).toEqual([source, destination, ...names].sort());
-    expect(before?.get(source)?.content.kind).toBe('missing');
+    expect([...(before?.paths.keys() ?? [])].sort()).toEqual(
+      [source, destination, ...names].sort()
+    );
+    expect(before?.paths.get(source)?.content.kind).toBe('missing');
     await writeFile(join(testDir, destination), 'changed');
     const after = await snapshotCheckout(testDir, []);
-    expect(after?.get(destination)).not.toEqual(before?.get(destination));
-    expect(after?.get(source)).toEqual(before?.get(source));
+    expect(after?.paths.get(destination)).not.toEqual(before?.paths.get(destination));
+    expect(after?.paths.get(source)).toEqual(before?.paths.get(source));
   });
 
   it('resolves dirty tracked files from a nested cwd', async () => {
@@ -274,7 +287,7 @@ describe('executeDagWorkflow -- node-level mutates_checkout: false (#2771)', () 
     await writeFile(join(testDir, 'tracked.txt'), 'dirty');
     const before = await snapshotCheckout(join(testDir, 'nested'), []);
     expect(before).toEqual(await snapshotCheckout(testDir, []));
-    expect(before?.get('tracked.txt')?.content.kind).toBe('file');
+    expect(before?.paths.get('tracked.txt')?.content.kind).toBe('file');
     await writeFile(join(testDir, 'tracked.txt'), 'other');
     expect(await snapshotCheckout(join(testDir, 'nested'), [])).not.toEqual(before);
   });
@@ -285,7 +298,7 @@ describe('executeDagWorkflow -- node-level mutates_checkout: false (#2771)', () 
     const excluded = join(testDir, 'engine');
     await mkdir(excluded);
     await git.execFileAsync('git', ['mv', 'visible.txt', 'engine/moved.txt'], { cwd: testDir });
-    expect([...((await snapshotCheckout(testDir, [excluded]))?.keys() ?? [])]).toEqual([
+    expect([...((await snapshotCheckout(testDir, [excluded]))?.paths.keys() ?? [])]).toEqual([
       'visible.txt',
     ]);
   });
@@ -297,14 +310,55 @@ describe('executeDagWorkflow -- node-level mutates_checkout: false (#2771)', () 
       const link = join(testDir, 'link');
       await symlink('missing-one', link);
       const before = await snapshotCheckout(testDir, []);
-      expect(before?.get('link')?.content).toEqual({ kind: 'symlink', value: 'missing-one' });
+      expect(before?.paths.get('link')?.content).toEqual({ kind: 'symlink', value: 'missing-one' });
       await rm(link);
       await symlink('missing-two', link);
       expect(await snapshotCheckout(testDir, [])).not.toEqual(before);
     }
   );
 
+  it('ignores inherited repository selectors when snapshotting cwd', async () => {
+    await initRepo(testDir);
+    await writeFile(join(testDir, 'mutated.txt'), 'cwd mutation');
+
+    const { stdout: expectedHeadOutput } = await git.execFileAsync('git', ['rev-parse', 'HEAD'], {
+      cwd: testDir,
+    });
+    const expectedHead = expectedHeadOutput.trim();
+
+    const otherDir = join(
+      tmpdir(),
+      `dag-mc-other-${Date.now()}-${Math.random().toString(36).slice(2)}`
+    );
+    await mkdir(otherDir, { recursive: true });
+    await initRepo(otherDir);
+
+    const priorGitDir = process.env.GIT_DIR;
+    const priorGitWorkTree = process.env.GIT_WORK_TREE;
+
+    process.env.GIT_DIR = join(otherDir, '.git');
+    process.env.GIT_WORK_TREE = otherDir;
+
+    try {
+      const snapshot = await snapshotCheckout(testDir, []);
+
+      expect(snapshot).toBeDefined();
+      expect(snapshot?.headCommit).toBe(expectedHead);
+      expect(snapshot?.paths.has('mutated.txt')).toBe(true);
+      expect(snapshot?.paths.get('mutated.txt')?.content.kind).toBe('file');
+    } finally {
+      if (priorGitDir === undefined) delete process.env.GIT_DIR;
+      else process.env.GIT_DIR = priorGitDir;
+
+      if (priorGitWorkTree === undefined) delete process.env.GIT_WORK_TREE;
+      else process.env.GIT_WORK_TREE = priorGitWorkTree;
+
+      await removeTempTree(otherDir);
+    }
+  });
+
   it('returns unavailable on Git failure', async () => {
+    await initRepo(testDir);
     const error = new git.GitFailure('unclassified', 'failed');
     const exec = spyOn(git, 'execFileAsync').mockRejectedValue(error);
     try {

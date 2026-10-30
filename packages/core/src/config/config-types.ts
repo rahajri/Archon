@@ -153,6 +153,8 @@ export interface GlobalConfig {
    * @default 'claude'
    */
   defaultAssistant?: string;
+  /** Allow eligible read-only AI nodes to fall back to another provider. */
+  crossProviderFallback?: boolean;
 
   /**
    * Assistant-specific defaults (model, reasoning effort, etc.)
@@ -321,6 +323,8 @@ export interface RepoConfig {
 export interface MergedConfig {
   botName: string;
   assistant: string | undefined;
+  /** Explicit opt-in for cross-provider fallback. */
+  crossProviderFallback?: boolean;
   assistants: AssistantDefaults;
   /**
    * Merged aliases (repo > global). Used by buildAiProfile at execution time.

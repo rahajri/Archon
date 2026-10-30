@@ -54,13 +54,17 @@ const REPOSITORY_SELECTORS = new Set([
  * Run git read-only. Repository-selecting variables are dropped so the observation reads
  * the checkout at `cwd`, not whatever repository the engine process happened to inherit.
  */
-function runGit(cwd: string, args: string[], input?: Buffer): Promise<GitResult> {
-  const env: NodeJS.ProcessEnv = {
+export function checkoutObservationGitEnv(): NodeJS.ProcessEnv {
+  return {
     ...Object.fromEntries(
       Object.entries(process.env).filter(([key]) => !REPOSITORY_SELECTORS.has(key))
     ),
     GIT_OPTIONAL_LOCKS: '0',
   };
+}
+
+function runGit(cwd: string, args: string[], input?: Buffer): Promise<GitResult> {
+  const env = checkoutObservationGitEnv();
   return new Promise(resolve => {
     const child = execFile(
       'git',
@@ -348,6 +352,11 @@ async function readHead(cwd: string): Promise<Head | undefined> {
   if (symbolic.code !== 0) return undefined;
   const ref = await runGit(read.top, ['show-ref', '--verify', '-q', text(symbolic.stdout)]);
   return ref.code === 1 ? { top: read.top, objectFormat, commit: null } : undefined;
+}
+
+/** Read the checkout HEAD commit using the canonical Git observation rules. */
+export async function readCheckoutHeadCommit(cwd: string): Promise<string | null | undefined> {
+  return (await readHead(cwd))?.commit;
 }
 
 /**

@@ -3,7 +3,8 @@
  * continues, run it with retry, and carry its session forward for later nodes and runs.
  */
 import { join as joinPath } from 'path';
-import { requireProvider, sessionPreview } from '@archon/provider-contract';
+import { requireProvider, sessionPreview, type ProviderFailure } from '@archon/provider-contract';
+import { isProviderLimit } from '../../../executor-shared';
 import type { AgentNode } from '../../../schemas';
 import {
   isNodeContextResume,
@@ -13,13 +14,29 @@ import {
 import { spellWorkflowCommand } from '../../../deps';
 import { readNodeArtifacts, writeNodeArtifactsListing } from '../../../artifacts-index';
 import { readComposedMeta } from '../../../compiled-command';
+import {
+  crossProviderFallbackNode,
+  crossProviderFallbackTarget,
+} from '../../../node-model-resolution';
 import { safeSendMessage } from '../../../platform-messages';
 import { getLog } from '../../log';
 import { aiConfigTextResolver } from '../../references';
-import { resolveNodeProviderAndModel } from '../../provider-resolution';
-import { getEffectiveNodeRetryConfig, runBudgetedAttempt, runNodeRetryLoop } from '../../retry';
+import {
+  resolveNodeProviderAndModel,
+  unsupportedFallbackSafetyCapabilities,
+} from '../../provider-resolution';
+import {
+  accumulateAttemptUsage,
+  getEffectiveNodeRetryConfig,
+  runBudgetedAttempt,
+  runNodeRetryLoop,
+} from '../../retry';
+import type { NodeExecutionResult } from '../../../node-record-serialization';
+import { persistNodeEvent, recordNodeState } from '../../../node-event-write';
+import { PROVIDER_FALLBACK_EVENT_TYPE } from '../../../store';
 import {
   checkoutSnapshotExcludes,
+  checkoutStateSinceSnapshot,
   snapshotGuardedNode,
   assertCheckoutUntouched,
 } from '../../checkout-guard';
@@ -48,16 +65,11 @@ export async function dispatchAgentNode(
   // Agent nodes reach a provider, so AI-configuration text gets this
   // observation; the body prompt is substituted per attempt below.
   const typedArtifactsFile = await writeNodeArtifactsListing(ctx.artifactsDir, ctx.workflowRun.id);
-  const {
-    provider,
-    model: resolvedNodeModel,
-    options: nodeOptions,
-    tier: resolvedTier,
-    effort: resolvedEffort,
-  } = await resolveNodeProviderAndModel(ctx, node, {
+  const resolved = await resolveNodeProviderAndModel(ctx, node, {
     resolveAiText: aiConfigTextResolver(ctx, typedArtifactsFile),
     warnedProviderConflicts: ctx.warnedProviderConflicts,
   });
+  const { provider } = resolved;
 
   const session = selectSession(ctx, node, provider, isParallelLayer);
   let resumeSessionId = session.resumeSessionId;
@@ -98,52 +110,33 @@ export async function dispatchAgentNode(
   // without offering retry another chance to mutate.
   const checkoutExcludes = checkoutSnapshotExcludes(ctx.artifactsDir, ctx.stateDir, ctx.logDir);
   const treeBefore = await snapshotGuardedNode(ctx, node, checkoutExcludes);
-  const retriedOutput = await runNodeRetryLoop(
+  const guard = { excludes: checkoutExcludes, before: treeBefore };
+  const rawPrimary = await runProviderAttempts(
+    ctx,
     node,
-    ctx.platform,
-    ctx.conversationId,
-    ctx.workflowRun,
-    ctx.deps.store,
-    ctx.stepNamePrefix + node.id,
-    getEffectiveNodeRetryConfig(node),
-    () =>
-      runBudgetedAttempt(ctx, node, async reserve => {
-        // Fresh per attempt: an attempt after a transient failure observes
-        // artifacts published in the interval, and never reuses the
-        // listing handed to AI-configuration substitution above.
-        const attemptTypedArtifactsFile = await writeNodeArtifactsListing(
-          ctx.artifactsDir,
-          ctx.workflowRun.id
-        );
-        return executeAgentNode(
-          ctx,
-          node,
-          reserve,
-          provider,
-          nodeOptions,
-          resumeSessionId,
-          resolvedNodeModel,
-          resolvedTier,
-          resolvedEffort,
-          ctx.stepNamePrefix,
-          iteration,
-          sessionCheckpoint(ctx, node, provider),
-          attemptTypedArtifactsFile,
-          session.resumeIntent
-        );
-      }),
-    { state: 'failed', output: '', error: 'Node did not execute' },
+    resolved,
+    resumeSessionId,
+    session.resumeIntent,
     iteration
   );
-  const output = await assertCheckoutUntouched(
+  const checkedPrimary = await assertCheckoutUntouched(
     node,
     ctx.cwd,
-    checkoutExcludes,
-    treeBefore,
-    retriedOutput,
+    guard.excludes,
+    guard.before,
+    rawPrimary,
     ctx.deps,
     ctx.logDir,
     ctx.guardedLayerSnapshots
+  );
+
+  const { output, sessionProvider } = await withReadOnlyFallback(
+    ctx,
+    node,
+    provider,
+    checkedPrimary,
+    { resumeSessionId, usesPersistedScope, typedArtifactsFile, iteration },
+    guard
   );
 
   // Cold-resume surfacing: this node requested a session resume but the
@@ -199,6 +192,7 @@ export async function dispatchAgentNode(
   if (
     usesPersistedScope &&
     persistScope &&
+    sessionProvider !== undefined &&
     output.state === 'completed' &&
     output.sessionId !== undefined
   ) {
@@ -207,7 +201,7 @@ export async function dispatchAgentNode(
         workflow_name: ctx.workflowName,
         node_id: node.id,
         scope_key: persistScope.key,
-        provider,
+        provider: sessionProvider,
         provider_session_id: output.sessionId,
         last_run_id: ctx.workflowRun.id,
       });
@@ -221,7 +215,7 @@ export async function dispatchAgentNode(
           nodeId: node.id,
           workflow: ctx.workflowName,
           scopeKey: persistScope.key,
-          provider,
+          provider: sessionProvider,
         },
         'persist_session_upsert_failed'
       );
@@ -234,7 +228,7 @@ export async function dispatchAgentNode(
     }
   }
 
-  return { nodeId: node.id, output, sessionProvider: provider };
+  return { nodeId: node.id, output, sessionProvider };
 }
 
 /**
@@ -426,4 +420,262 @@ async function buildColdResumeRecoveryPointer(
     );
     return '';
   }
+}
+
+type FallbackOutcome = Pick<LayerNodeResult, 'output' | 'sessionProvider'>;
+type ResolvedAgentProvider = Awaited<ReturnType<typeof resolveNodeProviderAndModel>>;
+interface CheckoutGuard {
+  excludes: readonly string[];
+  before: Awaited<ReturnType<typeof snapshotGuardedNode>>;
+}
+
+/** Run one provider's retry policy. Checkout assertions remain caller-owned. */
+async function runProviderAttempts(
+  ctx: RunLayersContext,
+  node: AgentNode,
+  resolved: ResolvedAgentProvider,
+  resumeSessionId: string | undefined,
+  resumeIntent: SessionResumeIntent,
+  iteration: number | undefined
+): Promise<NodeExecutionResult> {
+  const retriedOutput = await runNodeRetryLoop(
+    node,
+    ctx.platform,
+    ctx.conversationId,
+    ctx.workflowRun,
+    ctx.deps.store,
+    ctx.stepNamePrefix + node.id,
+    getEffectiveNodeRetryConfig(node),
+    () =>
+      runBudgetedAttempt(ctx, node, async reserve => {
+        const attemptTypedArtifactsFile = await writeNodeArtifactsListing(
+          ctx.artifactsDir,
+          ctx.workflowRun.id
+        );
+        return executeAgentNode(
+          ctx,
+          node,
+          reserve,
+          resolved.provider,
+          resolved.options,
+          resumeSessionId,
+          resolved.model,
+          resolved.tier,
+          resolved.effort,
+          ctx.stepNamePrefix,
+          iteration,
+          sessionCheckpoint(ctx, node, resolved.provider),
+          attemptTypedArtifactsFile,
+          resumeIntent
+        );
+      }),
+    { state: 'failed', output: '', error: 'Node did not execute' },
+    iteration
+  );
+  return retriedOutput;
+}
+
+const FALLBACK_CLASSES: ReadonlySet<ProviderFailure['class']> = new Set([
+  'quota_exhausted',
+  'rate_limited',
+  'overloaded',
+  'transient',
+]);
+
+async function withReadOnlyFallback(
+  ctx: RunLayersContext,
+  node: AgentNode,
+  provider: string,
+  primary: NodeExecutionResult,
+  run: {
+    resumeSessionId: string | undefined;
+    usesPersistedScope: boolean;
+    typedArtifactsFile: string;
+    iteration: number | undefined;
+  },
+  guard: CheckoutGuard
+): Promise<FallbackOutcome> {
+  const { resumeSessionId, usesPersistedScope } = run;
+  const fallbackProvider = crossProviderFallbackTarget(ctx.config, node, provider);
+  const failureClass = primary.state === 'failed' ? primary.providerFailure?.class : undefined;
+  const eligible =
+    resumeSessionId === undefined &&
+    !usesPersistedScope &&
+    ctx.namedResumeSourceIds?.has(node.id) !== true &&
+    failureClass !== undefined &&
+    FALLBACK_CLASSES.has(failureClass);
+  if (!eligible || fallbackProvider === undefined || failureClass === undefined) {
+    return { output: primary, sessionProvider: provider };
+  }
+
+  const checkoutState = await checkoutStateSinceSnapshot(ctx.cwd, guard.excludes, guard.before);
+  if (checkoutState === 'unavailable') {
+    return { output: primary, sessionProvider: provider };
+  }
+  if (checkoutState === 'changed') {
+    const guardedPrimary = await assertCheckoutUntouched(
+      node,
+      ctx.cwd,
+      guard.excludes,
+      guard.before,
+      primary,
+      ctx.deps,
+      ctx.logDir,
+      ctx.guardedLayerSnapshots,
+      true
+    );
+    return { output: guardedPrimary, sessionProvider: provider };
+  }
+
+  return runReadOnlyFallback(
+    ctx,
+    node,
+    provider,
+    fallbackProvider,
+    failureClass,
+    primary,
+    run.typedArtifactsFile,
+    run.iteration,
+    guard
+  );
+}
+
+async function keepPrimaryFailure(
+  ctx: RunLayersContext,
+  node: AgentNode,
+  provider: string,
+  primary: NodeExecutionResult,
+  logFields: Record<string, unknown>,
+  event: string,
+  message: string
+): Promise<FallbackOutcome> {
+  getLog().warn({ nodeId: node.id, primaryProvider: provider, ...logFields }, event);
+  await safeSendMessage(ctx.platform, ctx.conversationId, message, {
+    workflowId: ctx.workflowRun.id,
+    nodeName: node.id,
+  });
+  return { output: primary, sessionProvider: provider };
+}
+
+async function runReadOnlyFallback(
+  ctx: RunLayersContext,
+  node: AgentNode,
+  provider: string,
+  fallbackProvider: string,
+  failureClass: ProviderFailure['class'],
+  primary: NodeExecutionResult,
+  typedArtifactsFile: string,
+  iteration: number | undefined,
+  guard: CheckoutGuard
+): Promise<FallbackOutcome> {
+  const fallbackNode = crossProviderFallbackNode(node, fallbackProvider);
+
+  let resolved: ResolvedAgentProvider;
+  try {
+    const unsafe = unsupportedFallbackSafetyCapabilities(
+      ctx,
+      fallbackNode,
+      requireProvider(ctx.deps.providers, fallbackProvider).capabilities
+    );
+    if (unsafe.length > 0) {
+      return keepPrimaryFailure(
+        ctx,
+        node,
+        provider,
+        primary,
+        { fallbackProvider, unsupportedCapabilities: unsafe },
+        'dag.read_only_provider_fallback_unsafe',
+        `⚠️ Node \`${node.id}\`: fallback provider \`${fallbackProvider}\` cannot preserve ${unsafe.join(', ')}; keeping the original \`${provider}\` failure.`
+      );
+    }
+    resolved = await resolveNodeProviderAndModel(ctx, fallbackNode, {
+      resolveAiText: aiConfigTextResolver(ctx, typedArtifactsFile),
+      warnedProviderConflicts: ctx.warnedProviderConflicts,
+    });
+  } catch (error) {
+    return keepPrimaryFailure(
+      ctx,
+      node,
+      provider,
+      primary,
+      { fallbackProvider, error: error instanceof Error ? error.message : String(error) },
+      'dag.read_only_provider_fallback_unavailable',
+      `⚠️ Node \`${node.id}\`: fallback provider \`${fallbackProvider}\` could not be prepared; keeping the original \`${provider}\` failure.`
+    );
+  }
+
+  await persistNodeEvent(ctx.deps.store, {
+    workflow_run_id: ctx.workflowRun.id,
+    event_type: PROVIDER_FALLBACK_EVENT_TYPE,
+    step_name: ctx.stepNamePrefix + node.id,
+    data: {
+      primary_provider: provider,
+      fallback_provider: resolved.provider,
+      failure_class: failureClass,
+    },
+  });
+  getLog().warn(
+    {
+      nodeId: node.id,
+      primaryProvider: provider,
+      fallbackProvider: resolved.provider,
+      failureClass,
+    },
+    'dag.read_only_provider_fallback'
+  );
+  await safeSendMessage(
+    ctx.platform,
+    ctx.conversationId,
+    `⚠️ Node \`${node.id}\`: provider \`${provider}\` unavailable (${failureClass}) after its retry policy — retrying this read-only step with \`${resolved.provider}\`.`,
+    { workflowId: ctx.workflowRun.id, nodeName: node.id }
+  );
+
+  const rawFallback = await runProviderAttempts(
+    ctx,
+    fallbackNode,
+    resolved,
+    undefined,
+    'ordinary',
+    iteration
+  );
+  const fallback = await assertCheckoutUntouched(
+    fallbackNode,
+    ctx.cwd,
+    guard.excludes,
+    guard.before,
+    rawFallback,
+    ctx.deps,
+    ctx.logDir,
+    ctx.guardedLayerSnapshots,
+    true
+  );
+  const fallbackViolatedCheckout = fallback !== rawFallback;
+  const keepPrimary =
+    fallback.state === 'failed' &&
+    fallback.failureKind !== 'cancelled' &&
+    !fallbackViolatedCheckout &&
+    primary.state === 'failed' &&
+    isProviderLimit(primary.providerFailure);
+
+  if (keepPrimary) {
+    if (primary.execution === undefined) {
+      throw new Error(
+        `Node '${node.id}' preserved its primary provider failure without an execution record`
+      );
+    }
+    await recordNodeState(
+      { store: ctx.deps.store, logDir: ctx.logDir },
+      { ...primary.execution, accounting: 'amendment' }
+    );
+  }
+
+  return {
+    output: {
+      ...(keepPrimary ? primary : fallback),
+      ...accumulateAttemptUsage(primary, fallback, node.id),
+    },
+    // A successful cross-provider fallback session is deliberately never
+    // promoted downstream, regardless of which provider a successor resolves to.
+    sessionProvider: keepPrimary ? provider : undefined,
+  };
 }

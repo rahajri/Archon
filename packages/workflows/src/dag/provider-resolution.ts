@@ -314,6 +314,101 @@ function assertDispatchCapabilities(
   }
 }
 
+interface CapabilityCheck {
+  field: string;
+  capability: keyof ProviderCapabilities;
+  configured: boolean;
+  /** Cross-provider fallback must fail closed if this capability would be lost. */
+  fallbackSafety: boolean;
+}
+
+/**
+ * Single owner for node/config field -> provider capability mapping.
+ *
+ * `fallbackSafety` marks restrictions whose loss during a cross-provider fallback
+ * would broaden permissions or remove an execution boundary.
+ */
+function capabilityChecks(
+  workflowLevelOptions: ProviderResolutionContext['workflowLevelOptions'],
+  node: DagNode,
+  extras: {
+    declaredEffort?: EffortLevel;
+    envConfigured?: boolean;
+  } = {}
+): CapabilityCheck[] {
+  return [
+    {
+      field: 'allowed_tools/denied_tools',
+      capability: 'toolRestrictions',
+      configured: node.allowed_tools !== undefined || node.denied_tools !== undefined,
+      fallbackSafety: true,
+    },
+    {
+      field: 'hooks',
+      capability: 'hooks',
+      configured: node.hooks !== undefined,
+      fallbackSafety: true,
+    },
+    {
+      field: 'agents',
+      capability: 'agents',
+      configured: node.agents !== undefined,
+      fallbackSafety: false,
+    },
+    {
+      field: 'effort',
+      capability: 'effortControl',
+      configured: extras.declaredEffort !== undefined,
+      fallbackSafety: false,
+    },
+    {
+      field: 'maxBudgetUsd',
+      capability: 'costControl',
+      configured: node.maxBudgetUsd !== undefined,
+      fallbackSafety: true,
+    },
+    {
+      field: 'fallbackModel',
+      capability: 'fallbackModel',
+      configured: (node.fallbackModel ?? workflowLevelOptions.fallbackModel) !== undefined,
+      fallbackSafety: false,
+    },
+    {
+      field: 'sandbox',
+      capability: 'sandbox',
+      configured: (node.sandbox ?? workflowLevelOptions.sandbox) !== undefined,
+      fallbackSafety: true,
+    },
+    {
+      field: 'settingSources',
+      capability: 'settingSources',
+      configured: node.settingSources !== undefined,
+      fallbackSafety: false,
+    },
+    {
+      field: 'env',
+      capability: 'envInjection',
+      configured: extras.envConfigured === true,
+      fallbackSafety: false,
+    },
+  ];
+}
+
+/**
+ * Capabilities a cross-provider fallback must preserve rather than merely warn about.
+ * The mapping itself is owned by capabilityChecks() so the normal resolution path
+ * and the fallback safety boundary cannot drift apart.
+ */
+export function unsupportedFallbackSafetyCapabilities(
+  ctx: Pick<ProviderResolutionContext, 'workflowLevelOptions'>,
+  node: DagNode,
+  caps: ProviderCapabilities
+): string[] {
+  return capabilityChecks(ctx.workflowLevelOptions, node)
+    .filter(check => check.fallbackSafety && check.configured && !caps[check.capability])
+    .map(check => check.field);
+}
+
 /** Fields the node sets that its provider does not support, so they will be ignored. */
 function unsupportedCapabilities(
   ctx: Pick<ProviderResolutionContext, 'config' | 'workflowLevelOptions'>,
@@ -323,26 +418,13 @@ function unsupportedCapabilities(
   declaredEffort: EffortLevel | undefined
 ): string[] {
   const { config, workflowLevelOptions } = ctx;
-  const capChecks: [string, keyof ProviderCapabilities, boolean][] = [
-    [
-      'allowed_tools/denied_tools',
-      'toolRestrictions',
-      node.allowed_tools !== undefined || node.denied_tools !== undefined,
-    ],
-    ['hooks', 'hooks', node.hooks !== undefined],
-    ['agents', 'agents', node.agents !== undefined],
-    ['effort', 'effortControl', declaredEffort !== undefined],
-    ['maxBudgetUsd', 'costControl', node.maxBudgetUsd !== undefined],
-    [
-      'fallbackModel',
-      'fallbackModel',
-      (node.fallbackModel ?? workflowLevelOptions.fallbackModel) !== undefined,
-    ],
-    ['sandbox', 'sandbox', (node.sandbox ?? workflowLevelOptions.sandbox) !== undefined],
-    ['settingSources', 'settingSources', node.settingSources !== undefined],
-    ['env', 'envInjection', (config.envVars && Object.keys(config.envVars).length > 0) === true],
-  ];
-  const unsupported = capChecks.filter(([, cap, isSet]) => isSet && !caps[cap]).map(([f]) => f);
+  const capChecks = capabilityChecks(workflowLevelOptions, node, {
+    declaredEffort,
+    envConfigured: (config.envVars && Object.keys(config.envVars).length > 0) === true,
+  });
+  const unsupported = capChecks
+    .filter(check => check.configured && !caps[check.capability])
+    .map(check => check.field);
 
   // `webSearchMode:` is Codex's alone — no other provider reads it, and #2556
   // decided it keeps no node-level form, making it the single workflow-level

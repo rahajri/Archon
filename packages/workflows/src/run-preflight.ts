@@ -21,6 +21,8 @@ import type { ResolvedWorkflow, WorkflowRun, DagNode } from './schemas';
 import { resolvedBodyNodes } from './graph-plan';
 import {
   assistantModelDefaults,
+  crossProviderFallbackNode,
+  crossProviderFallbackTarget,
   resolveNodeModel,
   resolveNodeModelScope,
   resolveWorkflowModelScope,
@@ -384,6 +386,16 @@ export function collectRunCredentialRequirements(
 ): RunCredentialRequirement[] {
   const requirements = new Map<string, RunCredentialRequirement>();
   const models = assistantModelDefaults(prepared.config);
+  const requireNodeProvider = (invoked: DagNode, scope: WorkflowModelScope): string => {
+    const { provider, model } = resolveNodeModel(invoked, scope, models, prepared.aiProfile);
+    requirements.set(JSON.stringify([provider, model, invoked.settingSources]), {
+      provider,
+      model,
+      ...(invoked.settingSources !== undefined ? { settingSources: invoked.settingSources } : {}),
+      vendor: requireProvider(providers, provider).credentials.vendorFor(model),
+    });
+    return provider;
+  };
   const visit = (nodes: readonly DagNode[], scope: WorkflowModelScope): void => {
     for (const node of nodes) {
       const invocation = providerInvocation(node);
@@ -401,14 +413,17 @@ export function collectRunCredentialRequirements(
         });
         continue;
       }
-      const invoked = invocation.kind === 'gate_rework' ? invocation.rework : invocation.node;
-      const { provider, model } = resolveNodeModel(invoked, scope, models, prepared.aiProfile);
-      requirements.set(JSON.stringify([provider, model, invoked.settingSources]), {
-        provider,
-        model,
-        ...(invoked.settingSources !== undefined ? { settingSources: invoked.settingSources } : {}),
-        vendor: requireProvider(providers, provider).credentials.vendorFor(model),
-      });
+      if (invocation.kind === 'gate_rework') {
+        requireNodeProvider(invocation.rework, scope);
+        continue;
+      }
+      const invoked = invocation.node;
+      const provider = requireNodeProvider(invoked, scope);
+      // A fallback provider runs with the credential prepared here, never with an ambient one.
+      const fallbackProvider = crossProviderFallbackTarget(prepared.config, invoked, provider);
+      if (invoked.kind === 'agent' && fallbackProvider !== undefined) {
+        requireNodeProvider(crossProviderFallbackNode(invoked, fallbackProvider), scope);
+      }
     }
   };
   visit(workflow.nodes, prepared.scope);

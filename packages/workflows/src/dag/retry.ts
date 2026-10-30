@@ -244,7 +244,7 @@ export async function runNodeRetryLoop(
   }
 }
 
-function accumulateAttemptUsage(
+export function accumulateAttemptUsage(
   accumulated: Pick<NodeExecutionResult, 'costUsd' | 'tokens' | 'tokensUnknown'>,
   output: NodeExecutionResult,
   nodeId: string

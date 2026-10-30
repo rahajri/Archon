@@ -2,6 +2,7 @@
 import { clearRegistry, getRegisteredProviders, registerProvider } from '@archon/providers';
 import { describe, test, expect } from 'bun:test';
 import { loadConfig, clearConfigCache, toSafeConfig } from './config-loader';
+import { InvalidConfigError } from './config-validation';
 import { mockFsReadFile, useConfigTestEnv } from './test-harness';
 
 describe('config layer merge', () => {
@@ -38,6 +39,7 @@ defaults:
       const config = await loadConfig();
 
       expect(config.assistant).toBeUndefined();
+      expect(config.crossProviderFallback).toBeUndefined();
       // Built-ins always present; community providers (like `pi`) are
       // seeded dynamically from the registry — check the built-ins
       // explicitly rather than asserting an exhaustive shape.
@@ -49,6 +51,39 @@ defaults:
         toolCallAttentionMs: 1800000,
         autoResumeOnQuotaReset: true,
       });
+    });
+
+    test('merges the install-scoped cross-provider fallback opt-in from global config', async () => {
+      mockFsReadFile.mockResolvedValue('crossProviderFallback: true\n');
+
+      const config = await loadConfig();
+
+      expect(config.crossProviderFallback).toBe(true);
+    });
+
+    test('ignores a cross-provider fallback opt-in in repository config', async () => {
+      mockFsReadFile.mockImplementation(async (path: string) => {
+        if (path.replace(/\\/g, '/').includes('/test/repo/.archon/config.yaml')) {
+          return 'assistant: codex\ncrossProviderFallback: true\n';
+        }
+        return 'assistant: claude\n';
+      });
+
+      const config = await loadConfig('/test/repo');
+
+      expect(config.assistant).toBe('codex');
+      expect(config.crossProviderFallback).toBeUndefined();
+    });
+
+    test('rejects a non-boolean cross-provider fallback opt-in', async () => {
+      mockFsReadFile.mockResolvedValue('crossProviderFallback: "true"\n');
+
+      const error = await loadConfig().catch((e: unknown) => e);
+
+      expect(error).toBeInstanceOf(InvalidConfigError);
+      expect((error as InvalidConfigError).summary).toContain(
+        "'crossProviderFallback' must be a boolean"
+      );
     });
 
     test('merges global and repo workflow policy per field, without deprecated quota keys', async () => {

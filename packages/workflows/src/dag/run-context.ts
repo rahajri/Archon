@@ -55,7 +55,9 @@ export type SessionResumeIntent = 'ordinary' | 'source-fork' | 'owner-continuati
 export type SessionCheckpoint = (sessionId: string) => Promise<void>;
 
 /** Per-node result surfaced by a runLayers layer closure. `sessionProvider` tags which
- *  resolved provider created `output.sessionId` (session-producing paths only). */
+ *  resolved provider may promote `output.sessionId` downstream. It is intentionally
+ *  absent when a produced session must not become a sequential cursor, including a
+ *  successful cross-provider fallback. */
 export interface LayerNodeResult {
   nodeId: string;
   output: NodeExecutionResult;

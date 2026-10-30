@@ -243,7 +243,7 @@ async function readConfigFileIfPresent(configPath: string): Promise<string | und
  * Read ~/.archon/config.yaml. A missing file is created from the documented
  * template and loads as empty. Every other failure throws, naming the file:
  * permissions, YAML syntax, a top level that is not a mapping, or a rejected `tiers`/`aliases`, `streaming`,
- * `attentionNotices`, `concurrency` or `workflows` block.
+ * `attentionNotices`, `concurrency`, `crossProviderFallback` or `workflows` value.
  */
 async function readGlobalConfig(configPath: string): Promise<GlobalConfig> {
   const content = await readConfigFileIfPresent(configPath);
