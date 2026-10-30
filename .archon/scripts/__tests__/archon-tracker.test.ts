@@ -269,13 +269,45 @@ describe('ArchonTracker', () => {
     const { fetch, sent } = fakeFetch(...responses);
     return { tracker: new ArchonTracker(context, trackerBaseUrl(BASE), fetch), sent };
   };
-  const newTask = { title: 'Ship it', description: 'The brief.', status: 'todo' } as const;
+  const newTask = {
+    title: 'Ship it',
+    description: '<!-- archon-discovery ship-it -->\n<!-- archon-discovery-refs ["run:review#0"] -->\nThe brief.',
+    status: 'todo',
+  } as const;
+  const stored = (changes: Record<string, unknown> = {}): Record<string, unknown> => ({
+    ...task('t1'),
+    ...newTask,
+    ...changes,
+  });
 
-  test("creates a todo task in the context's project and returns its id", async () => {
-    const { tracker, sent } = trackerWith(json({ message: 'Task created successfully', task: task('t1') }));
+  test("creates a todo task in the context's project, reads it back as sent, and returns its id", async () => {
+    const { tracker, sent } = trackerWith(json({ message: 'Task created successfully', task: task('t1') }), json(stored()));
     expect(await tracker.createTask(newTask)).toBe('t1');
-    expect(sent).toEqual([{ method: 'POST', url: `${BASE}/api/tasks`, body: { ...newTask, project_id: PROJECT_ID } }]);
+    expect(sent).toEqual([
+      { method: 'POST', url: `${BASE}/api/tasks`, body: { ...newTask, project_id: PROJECT_ID } },
+      { method: 'GET', url: `${BASE}/api/tasks/t1`, body: undefined },
+    ]);
     expect(tracker.taskUrl('t1')).toBe(`${BASE}/api/tasks/t1`);
+  });
+
+  test.each([
+    ['strips its HTML comments', { description: 'The brief.' }, 'description'],
+    ['escapes its metadata', { description: newTask.description.replaceAll('<', '&lt;') }, 'description'],
+    ['truncates its description', { description: newTask.description.slice(0, 40) }, 'description'],
+    ['drops its description', { description: null }, 'description'],
+    ['alters its title', { title: 'Ship it later' }, 'title'],
+    ['alters its status', { status: 'backlog' }, 'status'],
+    ['stores it in another project', { project_id: '00000000-0000-4000-8000-000000000000' }, 'project_id'],
+  ])('refuses a created task the tracker %s, naming the field and the task', async (_case, changes, field) => {
+    const { tracker } = trackerWith(json({ task: task('t1') }), json(stored(changes)));
+    await expect(tracker.createTask(newTask)).rejects.toThrow(
+      `the tracker created task t1 but reads back a different ${field}; a later pass could not recover it`
+    );
+  });
+
+  test('refuses a created task that does not read back as a task', async () => {
+    const { tracker } = trackerWith(json({ task: task('t1') }), new Response('{"detail":"Task not found"}', { status: 404 }));
+    await expect(tracker.createTask(newTask)).rejects.toThrow('GET /api/tasks/t1 failed with 404');
   });
 
   test.each([
@@ -295,11 +327,6 @@ describe('ArchonTracker', () => {
       throw new TypeError('connection refused');
     }) as unknown as typeof fetch);
     await expect(tracker.listProjectTasks()).rejects.toThrow(`the tracker at ${BASE} is unreachable`);
-  });
-
-  test('refuses a created task that landed in another project', async () => {
-    const { tracker } = trackerWith(json({ task: task('t1', '00000000-0000-4000-8000-000000000000') }));
-    await expect(tracker.createTask(newTask)).rejects.toThrow(/not d9f7bb82/);
   });
 
   test('refuses a response that is not a task, or a listed task without its archived flag', async () => {
@@ -389,13 +416,14 @@ function contractProblems(request: Sent): string[] {
 
 describe("the tracker's contract", () => {
   test('every request the client sends is one the captured OpenAPI document declares', async () => {
-    const { fetch, sent } = fakeFetch(json([task('t1')]), json({ task: task('t2') }));
+    const created = { title: 'A defect', description: 'The brief.', status: 'todo' } as const;
+    const { fetch, sent } = fakeFetch(json([task('t1')]), json({ task: task('t2') }), json({ ...task('t2'), ...created }));
     const tracker = declaredArchonTracker(checkout(ARCHON_PROJECT), BAREA, BASE, fetch);
     await tracker?.listProjectTasks();
-    await tracker?.createTask({ title: 'A defect', description: 'The brief.', status: 'todo' });
+    await tracker?.createTask(created);
 
-    expect(sent.map(request => request.method)).toEqual(['GET', 'POST']);
-    expect(sent.map(contractProblems)).toEqual([[], []]);
+    expect(sent.map(request => request.method)).toEqual(['GET', 'POST', 'GET']);
+    expect(sent.map(contractProblems)).toEqual([[], [], []]);
   });
 
   test('the check refuses a request outside the contract', () => {
@@ -411,5 +439,6 @@ describe("the tracker's contract", () => {
       'body.title is not a string',
     ]);
     expect(contractProblems({ method: 'PUT', url: `${BASE}/api/tasks/t1`, body: {} })).toEqual(['PUT /api/tasks/t1 is not in the contract']);
+    expect(contractProblems({ method: 'GET', url: `${BASE}/api/tasks`, body: undefined })).toEqual(['GET /api/tasks is not in the contract']);
   });
 });

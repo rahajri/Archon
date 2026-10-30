@@ -15,6 +15,22 @@
         }
       }
     },
+    "/api/tasks/{task_id}": {
+      "get": {
+        "parameters": [
+          {
+            "name": "task_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Task Id"
+            }
+          }
+        ],
+        "requestBody": null
+      }
+    },
     "/api/projects/{project_id}/tasks": {
       "get": {
         "parameters": [

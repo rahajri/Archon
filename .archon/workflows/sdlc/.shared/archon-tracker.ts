@@ -4,8 +4,8 @@
  *
  * This is separate from the forge: a forge issue and an Archon task are different
  * records on different services, and choosing the Archon tracker never reroutes an
- * issue write. Every request is scoped to the context's `archonProjectId`; the
- * tracker cannot be built without one, so there is no project to fall back to.
+ * issue write. Every task it lists or creates is in the context's `archonProjectId`;
+ * the tracker cannot be built without one, so there is no project to fall back to.
  *
  * The request shapes here are the subset of the tracker's OpenAPI document this pack
  * uses; `.archon/scripts/__tests__/archon-tracker.test.ts` holds them against a capture
@@ -17,7 +17,7 @@ import { type QualifiedPr, sameRepo } from './forge.ts';
 import { type ArchonProjectContext, PROJECT_FILE, readProjectContext } from './project-context.ts';
 import { isObject } from './typed.ts';
 
-/** The fields of a listed task this pack reads; the tracker returns more. */
+/** The fields of a task this pack reads; the tracker returns more. */
 export interface ArchonTask {
   readonly id: string;
   readonly project_id: string;
@@ -50,8 +50,8 @@ export class ArchonTrackerError extends Error {
  * There is no default: an unset or malformed value is refused rather than guessed. A
  * value carrying credentials (userinfo), a query or a fragment is refused, and no refusal
  * here quotes the value, which may hold a secret. An accepted base therefore carries
- * none of those, so the request diagnostics may name its origin and path, as every task
- * URL this pack prints does.
+ * none of those, so what is built on it may be printed: task URLs, the origin of a
+ * tracker that is unreachable, and the method and path of a request that fails.
  */
 export function trackerBaseUrl(value: string | undefined): URL {
   const raw = (value ?? '').trim();
@@ -105,16 +105,24 @@ export class ArchonTracker {
     private readonly fetchImpl: typeof fetch = fetch
   ) {}
 
-  /** Create a task in the project and return its id. */
+  /**
+   * Create a task in the project and return its id, once the tracker reads it back with
+   * the project, title, description and status sent. A later pass recovers the task only
+   * by the metadata in its description, so a task stored any other way is refused, not
+   * reported as filed.
+   */
   async createTask(task: NewArchonTask): Promise<string> {
-    const body = await this.request('POST', this.url('api/tasks'), { ...task, project_id: this.context.archonProjectId });
+    const sent = { ...task, project_id: this.context.archonProjectId };
+    const body = await this.request('POST', this.url('api/tasks'), sent);
     const created = isObject(body) ? body.task : undefined;
-    if (!isObject(created) || typeof created.id !== 'string' || typeof created.project_id !== 'string') {
+    if (!isObject(created) || typeof created.id !== 'string') {
       throw new ArchonTrackerError(`the tracker's create response is not a task: ${JSON.stringify(body).slice(0, 500)}`, null);
     }
-    if (created.project_id !== this.context.archonProjectId) {
+    const stored = taskOf(await this.request('GET', new URL(this.taskUrl(created.id))));
+    const altered = (['project_id', 'title', 'description', 'status'] as const).filter(field => stored[field] !== sent[field]);
+    if (altered.length > 0) {
       throw new ArchonTrackerError(
-        `the tracker created task ${created.id} in project ${created.project_id}, not ${this.context.archonProjectId}.`,
+        `the tracker created task ${created.id} but reads back a different ${altered.join(', ')}; a later pass could not recover it, so fix or remove it before running again.`,
         null
       );
     }
@@ -173,7 +181,7 @@ function taskOf(value: unknown): ArchonTask {
     typeof value.status !== 'string' ||
     typeof value.archived !== 'boolean'
   ) {
-    throw new ArchonTrackerError(`the tracker listed something that is not a task: ${JSON.stringify(value).slice(0, 500)}`, null);
+    throw new ArchonTrackerError(`the tracker returned something that is not a task: ${JSON.stringify(value).slice(0, 500)}`, null);
   }
   return {
     id: value.id,

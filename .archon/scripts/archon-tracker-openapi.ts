@@ -19,6 +19,7 @@ export const CAPTURE = resolve(import.meta.dir, '__tests__/fixtures/archon-track
 /** The operations the client sends, as `[path, method]`. */
 const OPERATIONS = [
   ['/api/tasks', 'post'],
+  ['/api/tasks/{task_id}', 'get'],
   ['/api/projects/{project_id}/tasks', 'get'],
 ] as const;
 
