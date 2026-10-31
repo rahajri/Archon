@@ -1,0 +1,185 @@
+name: archon-project-intake
+description: |
+  Turn the specifications an operator uploaded to an Archon project's Docs into a
+  backlog of todo tasks in that same project. The checkout's .factory/project.yaml
+  names the project, which must keep its work in the Archon tracker; the run reads its
+  documents typed spec through the tracker's API, and one agent analyses them into
+  lots and implementation-sized tasks, each with dependencies, acceptance criteria and
+  the sources it rests on. The operator approves or rejects the proposed split once;
+  only after approval does a script create the tasks, refusing when the project, the
+  tracker, the repository or the analysed specifications changed in between. Each task
+  carries its plan key in a marker, so running again recovers what exists instead of
+  creating it twice.
+
+  Use when: the specification for a project is in its Archon Docs and the backlog is
+  not yet split into tasks. Run it from the repository checkout; the document itself
+  never goes on the command line.
+  NOT for: a project that keeps its work on GitHub, or delivering the tasks it files.
+
+returns: create
+
+# Reads the checkout's project file and writes only run artifacts and tracker tasks.
+worktree:
+  enabled: false
+mutates_checkout: false
+
+nodes:
+  # Writes intake/sources.json (the specifications, fingerprinted) and intake/tasks.json
+  # (the tasks an earlier intake created). Refuses a checkout without an Archon project,
+  # a project without a usable specification, and corrupt intake metadata.
+  - id: sources
+    script: sources
+    runtime: bun
+    # SOURCES_OUTPUT in .shared/project-intake.ts, the type the script emits; a test
+    # holds the two equal.
+    output_format:
+      type: object
+      additionalProperties: false
+      properties:
+        project_id: { type: string }
+        documents: { type: integer }
+        fingerprint: { type: string }
+      required: [project_id, documents, fingerprint]
+
+  - id: plan
+    command: plan
+    depends_on: [sources]
+    model: large
+    mutates_checkout: false
+    # The specifications are data to analyse; the agent only reads them.
+    allowed_tools: [Read]
+    # PLAN_SCHEMA in .shared/project-intake.ts, which the proposal checks the output
+    # against; a test holds the two equal.
+    output_format:
+      type: object
+      additionalProperties: false
+      properties:
+        status: { type: string, enum: [ready, insufficient] }
+        # Why the specifications cannot be planned from; empty when ready.
+        reason: { type: string }
+        objective: { type: string }
+        scope:
+          type: object
+          additionalProperties: false
+          properties:
+            included: { type: array, items: &text { type: string, pattern: '\S' } }
+            excluded: { type: array, items: *text }
+          required: [included, excluded]
+        assumptions: &cited_statements
+          type: array
+          items:
+            type: object
+            additionalProperties: false
+            properties:
+              text: *text
+              source_refs: &cited
+                type: array
+                items: &ref
+                  type: object
+                  additionalProperties: false
+                  properties:
+                    document_id: *text
+                    location: *text
+                  required: [document_id, location]
+                minItems: 1
+            required: [text, source_refs]
+        constraints: *cited_statements
+        lots:
+          type: array
+          items:
+            type: object
+            additionalProperties: false
+            properties:
+              key: &key { type: string, pattern: '^[a-z0-9][a-z0-9-]{2,80}$' }
+              title: &line { type: string, pattern: '^[^\r\n]*\S[^\r\n]*$' }
+              summary: *text
+            required: [key, title, summary]
+        tasks:
+          type: array
+          items:
+            type: object
+            additionalProperties: false
+            properties:
+              key: *key
+              lot: *key
+              title: *line
+              description: *text
+              priority: { type: string, enum: [critical, high, medium, low] }
+              dependencies: { type: array, items: *key }
+              acceptance_criteria: { type: array, items: *text, minItems: 1 }
+              source_refs: *cited
+            required: [key, lot, title, description, priority, dependencies, acceptance_criteria, source_refs]
+        open_questions:
+          type: array
+          items:
+            type: object
+            additionalProperties: false
+            properties:
+              text: *text
+              blocking: { type: boolean }
+              source_refs: &refs { type: array, items: *ref }
+            required: [text, blocking, source_refs]
+        risks:
+          type: array
+          items:
+            type: object
+            additionalProperties: false
+            properties:
+              text: *text
+              source_refs: *refs
+            required: [text, source_refs]
+      required: [status, reason, objective, scope, assumptions, constraints, lots, tasks, open_questions, risks]
+
+  # Refuses a plan that does not hold together or that the agent found insufficient;
+  # writes intake/plan.json and the approval question for a ready one.
+  - id: proposal
+    script: proposal
+    runtime: bun
+    depends_on: [sources, plan]
+    with:
+      plan: { from: "$plan.output" }
+    # PROPOSAL_OUTPUT in .shared/project-intake.ts; a test holds the two equal.
+    output_format:
+      type: object
+      additionalProperties: false
+      properties:
+        question: { type: string }
+        lots: { type: integer }
+        tasks: { type: integer }
+      required: [question, lots, tasks]
+
+  - id: approve
+    depends_on: [proposal]
+    wait:
+      attention: "$proposal.output.question"
+      form: approval
+      labels:
+        intake: approval
+
+  - id: rejected
+    depends_on: [approve]
+    when: "$approve.output.decision == 'reject'"
+    cancel: "The operator rejected the proposed split; no task was created."
+
+  - id: create
+    script: create
+    runtime: bun
+    depends_on: [approve]
+    when: "$approve.output.decision == 'approve'"
+    # CREATE_OUTPUT in .shared/project-intake.ts; a test holds the two equal.
+    output_format:
+      type: object
+      additionalProperties: false
+      properties:
+        summary: { type: string }
+        created: &written
+          type: array
+          items:
+            type: object
+            additionalProperties: false
+            properties:
+              key: { type: string }
+              url: { type: string }
+            required: [key, url]
+        recovered: *written
+      required: [summary, created, recovered]

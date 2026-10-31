@@ -155,6 +155,85 @@ has an empty `GH_TOKEN=` line to remove. The operations still refuse on their ow
 Run `archon workflow run archon-forge-check` from a checkout to see the same check's
 result without starting delivery.
 
+## Archon task tracker
+
+A project can keep its work items as tasks in an Archon task tracker instead of
+forge issues. The tracker is a separate service from the forge, so selecting it
+changes no issue read or write above. The project declares it in
+`.factory/project.yaml` at the repository root:
+
+```yaml
+project:
+  name: <project name>
+  archon_project_id: <tracker project UUID>
+  github_repo: <owner>/<name>
+tracker:
+  primary: archon # or github
+  create_github_issue_on_ready: true
+```
+
+[`.shared/project-context.ts`](.shared/project-context.ts) reads that file into a
+`ProjectContext`. `archon_project_id` names the project in the tracker; it is not the
+engine's codebase for the checkout, and it is never derived from a repository name.
+`github_repo` is the repository the file was written for, as `owner/name` on
+github.com or as a remote URL (HTTPS, `git@host:owner/name` or `ssh://`), which reduces
+to the same identity. `create_github_issue_on_ready` is recorded as project policy;
+nothing acts on it yet.
+
+[`.shared/archon-tracker.ts`](.shared/archon-tracker.ts) lists the project's tasks,
+archived ones included, and creates tasks in it with the context's `archon_project_id`
+as their `project_id`. A created task is read back, and one that differs in any field
+sent (its project, title, description or status) is refused rather than reported as
+filed. The refusal names the task: a later pass recovers it as filed if the marker on
+its description's first line survived and it is in the project, so check it before
+running again. Only a create the tracker answers with 422, its request validation
+error, is a plain refusal: the tracker sends it before its handler runs, so no task was
+stored. Any other failure once the request is sent is reported as unconfirmed, with the
+task's id when the tracker returned one, because the task may be stored: a 400 or 500,
+which the tracker's handler can send after storing the task; a gateway's 502 or 504 or
+any other status a proxy sends; no answer; an answer that is not a task; a read-back
+that fails or differs from what was sent. A task list holding another project's task is refused too, since each
+workflow recovers its own filings from that list. It reaches the tracker at `ARCHON_TRACKER_BASE_URL`, set in the environment
+Archon runs with, for example `ARCHON_TRACKER_BASE_URL=http://127.0.0.1:8181` in
+`~/.archon/.env`. There is no default. A value with credentials (userinfo), a query or
+a fragment, even an empty `?` or `#`, is refused, and no refusal quotes the value or any part of it, since it may
+hold a secret. An accepted value carries none of those, so diagnostics may show it and
+what is built on it, and only that: the normalized value itself, which the discoveries
+workflow carries from `facts` to its outcome and names when a resumed outcome finds it
+changed, task URLs in the outcome, the origin of a tracker that is unreachable, and the
+method and path of a request that fails. Besides those, a failed
+request shows its status and the start of the tracker's response, and JSON in a
+successful response that should be a task and is not shows its start.
+
+Only a checkout with no `.factory/project.yaml`, or whose `tracker.primary` is
+`github`, declares no tracker and keeps filing on GitHub. Every other state is refused
+before any request, never read as GitHub: a `.factory/` or project file that cannot be
+read, a file that is not valid YAML or misses a field, an `archon` tracker with no
+`archon_project_id`, a `github_repo` other than the repository the run works on, or an
+unset or malformed base URL.
+
+The requests are the subset of the tracker's OpenAPI document the pack uses.
+[`archon-tracker-openapi.ts`](../../scripts/archon-tracker-openapi.ts) captures that
+subset into the pack's tests, which hold every request the client sends against it;
+run it with `--check` and `ARCHON_TRACKER_BASE_URL` set to see whether a running
+tracker still matches the capture, and without `--check` to refresh it.
+
+[`.shared/archon-docs.ts`](.shared/archon-docs.ts) reads the documents attached to the
+same project, what an operator uploads in its Docs tab: the project, its document list,
+and each document in full by its id, refusing a response for another project or
+document. A refusal describes a document by its id and field names, never its content.
+
+Two workflows file there: [discoveries](#discoveries), where a project that declares
+the Archon tracker gets a `todo` task instead of an issue, and
+[project intake](#project-intake), which files the backlog it plans from the project's
+specifications. Each recovers its own tasks by a metadata comment it alone parses,
+`<!-- archon-discovery` or `<!-- archon-project-intake`, and refuses a task holding its
+family's comment anywhere but the canonical header. So
+[`.shared/task-metadata.ts`](.shared/task-metadata.ts) reserves both families for the
+whole task space: neither workflow writes text holding either one, in any spacing or
+case, into a task. Other HTML comments, `<!-- archon-` ones included, are ordinary
+text.
+
 ## Public writes belong to a script
 
 An agent judges and authors; one node owns the public writes and
@@ -804,10 +883,13 @@ terminal report lists.
 - **Decisions.** One agent decides every queued record, under the project's direction
   document and the policy files `discoveries.md`, `triage.md` and `rulings.md`. It
   verifies each claim against the default branch's head with `git show` and
-  `git grep`, merges duplicates across runs, and searches the tracker before filing.
-  There is no store of decisions across runs: a defect a later run finds again is
-  judged again against the tracker. Each discovery ends in one decision: `file` an
-  issue with a full brief, `track` it on the open issue that already covers it (with
+  `git grep`, merges duplicates across runs, and searches the tracker before filing:
+  GitHub's issues, or, when the project files into the
+  [Archon task tracker](#archon-task-tracker), the tasks earlier passes filed there,
+  archived ones included, which `facts` lists into `drain/tasks.json`. There is no
+  store of decisions across runs: a defect a later run finds again is judged again
+  against the tracker. Each discovery ends in one decision: `file` an issue (or a
+  task) with a full brief, `track` it on the open issue that already covers it (with
   one marked evidence comment per key, only when it adds something), `drop` it with a
   reason, or `ask` a maintainer.
 - **Writes.** The `outcome` script checks before any write that every queued record is
@@ -819,6 +901,26 @@ terminal report lists.
   and the questions on each run's document. Filed issues carry no labels: intake
   triages them like any other issue, which it does only when the install's forge
   identity is on `maintainers.json`.
+- **Writes to the Archon tracker.** When the checkout's `.factory/project.yaml` names
+  the Archon tracker as primary, a filing is a `todo` task in that project instead,
+  and the pass opens no issue and posts no comment: a `track` is refused. A task's
+  description begins with the same marker, then `<!-- archon-discovery-refs [...] -->`
+  naming the queued refs it was filed for, then the brief. Before any write the outcome
+  lists the project's tasks, archived ones included, and a filing recovers the task that
+  carries its key's marker or any of its refs instead of creating one, so a pass run
+  again after a stop recovers its task whatever key the agent gives it the second time.
+  A filing that matches two tasks refuses the pass, and so does a task holding
+  archon-discovery metadata in any form but that header (a marker that is not on the
+  first line exactly, a key that is not a decision key, a refs line that is not a list
+  of qualified refs), rather than reading it as no match; so does a brief that would put
+  such text, or project intake's marker, in a task. A defect a different run finds again
+  has different refs; finding its task is the agent's judgment, made from
+  `drain/tasks.json`, and it reuses that task's key. A tracker that is misconfigured or
+  fails refuses the pass, in `facts` before any run is claimed, rather than filing on
+  GitHub. `facts` carries the target it chose, GitHub or one tracker project on the
+  tracker at `ARCHON_TRACKER_BASE_URL` as it accepted and normalized it, to the outcome,
+  which files there, a resumed outcome too, and refuses before any write when the
+  checkout's project or `ARCHON_TRACKER_BASE_URL` no longer names that target.
 - **Questions.** Every `ask` in a pass becomes one attention item labelled
   `discoveries: question`. The answer is stored on the asking run's document. The runs
   those records came from stay claimed by the asking run until it ends, so no other
@@ -851,6 +953,77 @@ back:
   "schedule": { "intervalSeconds": 14400, "runAtLoad": false }
 }
 ```
+
+## Project intake
+
+[`archon-project-intake`](project-intake/archon-project-intake.yaml) turns the
+specifications an operator uploaded to an Archon project's Docs into `todo` tasks in
+that project. The document goes from the operator's workstation to the project's Docs,
+never through the command line or the checkout: upload, then `archon-project-intake`,
+its proposal, the operator's approval, and the tasks as `todo` in the project.
+
+1. Before the first run, declare the project in the repository's `.factory/project.yaml`
+   with its `archon_project_id`, `github_repo` and `tracker.primary: archon`, as
+   [Archon task tracker](#archon-task-tracker) shows, and set `ARCHON_TRACKER_BASE_URL`
+   where Archon runs. Without that file the run refuses before any request.
+2. Upload the specification from your workstation in the project's Docs tab and give it
+   the type `spec`.
+3. Run it against the checkout, with no message:
+   `archon workflow run archon-project-intake --cwd <checkout> --no-worktree`. Add
+   `--workflow-source <archon checkout>` to run the pack from a checkout of Archon
+   rather than the installed one.
+4. Answer the approval it pauses on: `approve` creates the tasks, `reject` ends the
+   run cancelled with nothing written.
+
+- **Sources.** `sources` refuses, before any request, a checkout with no project file,
+  one whose project keeps its work on GitHub, one with no git remote pointing at the
+  file's `github_repo`, and an unset or refused base URL; there is no GitHub path. It
+  reads every document in the project and keeps those typed `spec`, several included.
+  A project with no documents, none typed `spec`, or a `spec` holding fewer than 25
+  words outside its headings (a document the Docs tab just created holds its title and
+  a placeholder line) stops the run with what to do; nothing is read from the
+  repository instead. `intake/sources.json` holds each specification's content, the
+  tracker's metadata, and a SHA-256 of its id, title, type and content; its
+  `fingerprint` covers the project and every specification. `intake/tasks.json` lists
+  the tasks an earlier intake created there, archived ones included.
+- **Plan.** One large-model agent, which can only read, analyses the specifications into
+  an objective, scope, the assumptions and constraints they state, lots, and tasks with
+  a key, lot, priority, dependencies, acceptance criteria and the source locations they
+  rest on, plus open questions and risks. It reuses the key of a task in `tasks.json`
+  that covers the same work. Specifications too thin to plan from end the run at
+  `proposal` with the agent's reason.
+- **Approval.** `proposal` refuses a plan that does not hold together: one outside the
+  plan node's `output_format` (a malformed key, a title on more than one line, a blank
+  entry, a task with no acceptance criterion or source, an assumption or constraint
+  with no source), an unknown or cyclic dependency, a citation of a document that was
+  not analysed, or text holding a reserved task metadata comment,
+  `<!-- archon-project-intake` or `<!-- archon-discovery`. That `output_format` is the
+  `PLAN_SCHEMA` the proposal checks the plan against, held equal to it by the pack's
+  tests. It also refuses an `intake/sources.json` or `intake/tasks.json` that is not
+  what `sources` writes. A
+  ready plan is written to `intake/plan.json` with the project, tracker, repository and
+  fingerprint it was made from, and the run pauses on one approval: the documents
+  analysed, the lots and how many tasks would be created or are already there, the
+  assumptions, and the blocking open questions.
+- **Writes.** After approval, `create` refuses before any write when the checkout or
+  environment now names another project, tracker or repository, or the project's
+  specifications were added, removed or edited since they were analysed: run the
+  intake again to plan from what is there now. So does a description that a document
+  title would fill with reserved task metadata. It then creates each task, dependencies
+  first, as `todo` in the project, read back as sent. A task the tracker refuses before
+  storing anything stops the run naming what this run created; one it may have stored
+  without confirming, any other failure, stops it naming the task's id when known and
+  its marker, to find in the project before running again. A task's description starts with
+  `<!-- archon-project-intake <key> -->`, then the task's description, lot, priority,
+  dependencies, acceptance criteria and sources. The lot is written there rather than
+  in the tracker's `feature` field, which the tracker client does not send.
+- **Running again.** A task carrying a planned key's marker, archived or not, is
+  recovered and left as it is, so a `create` resumed after a failure partway creates
+  only what is missing, and a later intake creates only tasks under new keys. An
+  unconfirmed task is recovered only if its marker survived on its description's first
+  line; otherwise a rerun creates it again. Two tasks
+  carrying one key, or intake metadata anywhere but a description's first line, refuses
+  the run before any write.
 
 ## Worktree cleanup
 

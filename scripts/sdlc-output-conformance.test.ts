@@ -52,6 +52,15 @@ import { type AgentDecision, AGENT_OUTCOMES } from '../.archon/workflows/sdlc/.s
 import { parseQualifiedPr } from '../.archon/workflows/sdlc/.shared/forge';
 import { SIZE_LABEL, TYPE_LABEL } from '../.archon/workflows/sdlc/.shared/labels';
 import { claimDisposition } from '../.archon/workflows/sdlc/.shared/state';
+import {
+  handle,
+  intakeCheckout,
+  intakeTask,
+  plan,
+  PROJECT_ID,
+  spec,
+  tracker,
+} from '../.archon/scripts/__tests__/fixtures/project-intake';
 import { newWorkItem } from '../.archon/workflows/sdlc/.shared/workitem';
 
 const { runPackScript } = packScriptRunner();
@@ -71,7 +80,11 @@ function outputFormat(workflow: string, nodeId: string): Schema {
 }
 
 /** A script that succeeded with output its node's declared schema admits. */
-function admitted(run: ScriptRun, workflow: string, nodeId: string): Record<string, unknown> {
+function admitted(
+  run: Pick<ScriptRun, 'code' | 'stdout' | 'stderr'>,
+  workflow: string,
+  nodeId: string
+): Record<string, unknown> {
   expect({ code: run.code, stderr: run.stderr }).toEqual({ code: 0, stderr: '' });
   const output = JSON.parse(run.stdout) as Record<string, unknown>;
   expect(validateStructuredOutput(output, outputFormat(workflow, nodeId))).toEqual({ valid: true });
@@ -457,6 +470,9 @@ describe('discoveries', () => {
         [RUN],
         {
           INPUTS_PATH: String(output.path),
+          INPUTS_TRACKER: String(output.tracker),
+          INPUTS_ARCHON_PROJECT_ID: String(output.archon_project_id),
+          INPUTS_TRACKER_BASE_URL: String(output.tracker_base_url),
           INPUTS_DECISIONS: JSON.stringify(decisions),
           INPUTS_SUMMARY: 'summary',
         },
@@ -561,4 +577,63 @@ describe('the review bench', () => {
       })
     ).toBe(getRunArtifactsDirForRoot(detail.output_root, detail.id));
   });
+});
+
+describe('project intake', () => {
+  const INTAKE = 'project-intake/archon-project-intake.yaml';
+
+  async function run(
+    name: string,
+    cwd: string,
+    env: Record<string, string>
+  ): Promise<Pick<ScriptRun, 'code' | 'stdout' | 'stderr'>> {
+    const child = Bun.spawn(
+      [process.execPath, join(PACK, 'project-intake/scripts', `${name}.ts`)],
+      {
+        cwd,
+        env: { ...process.env, ...env },
+        stdout: 'pipe',
+        stderr: 'pipe',
+      }
+    );
+    const [stdout, stderr, code] = await Promise.all([
+      new Response(child.stdout).text(),
+      new Response(child.stderr).text(),
+      child.exited,
+    ]);
+    return { code, stdout, stderr };
+  }
+
+  test('sources, proposal and create emit what their nodes admit', async () => {
+    const state = tracker([spec('doc-1')], [intakeTask('t1', 'lot-reception-check', true)]);
+    const server = Bun.serve({
+      port: 0,
+      hostname: '127.0.0.1',
+      fetch: request => handle(state, request),
+    });
+    try {
+      const root = intakeCheckout(track);
+      const env = {
+        ARTIFACTS_DIR: track(mkdtempSync(join(tmpdir(), 'archon-project-intake-artifacts-'))),
+        ARCHON_TRACKER_BASE_URL: `http://127.0.0.1:${String(server.port)}`,
+      };
+      expect(admitted(await run('sources', root, env), INTAKE, 'sources')).toMatchObject({
+        project_id: PROJECT_ID,
+        documents: 1,
+      });
+      expect(
+        admitted(
+          await run('proposal', root, { ...env, INPUTS_PLAN: JSON.stringify(plan()) }),
+          INTAKE,
+          'proposal'
+        )
+      ).toMatchObject({ lots: 2, tasks: 2 });
+      expect(admitted(await run('create', root, env), INTAKE, 'create')).toMatchObject({
+        created: [{ key: 'part-lot-link' }],
+        recovered: [{ key: 'lot-reception-check' }],
+      });
+    } finally {
+      server.stop(true);
+    }
+  }, 60_000);
 });

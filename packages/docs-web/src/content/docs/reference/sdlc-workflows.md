@@ -87,11 +87,31 @@ The stage after the build queue, started by a schedule binding. Each run claims 
 
 #### `archon-discoveries`
 
-Drains the discoveries finished runs recorded outside their own scope. One agent verifies each one against the default branch, merges duplicates across runs and with earlier decisions, and decides: file an issue with a full brief, track it on the open issue that already covers it, drop it with a reason, or ask a maintainer. Scripts perform only the writes it declared.
+Drains the discoveries finished runs recorded outside their own scope. One agent verifies each one against the default branch, merges duplicates across runs and with earlier decisions, and decides: file an issue with a full brief, track it on the open issue that already covers it, drop it with a reason, or ask a maintainer. A repository whose `.factory/project.yaml` names the Archon task tracker as primary files a `todo` task in its tracker project instead of an issue, and tracks nothing on GitHub. Scripts perform only the writes it declared.
 
 **When to use it**: Runs keep finding defects outside their change and nobody reads their `discoveries.md`. [Set up the SDLC factory](/getting-started/sdlc-factory/) runs it by hand and binds it.
 
-**What it produces**: Filed issues and evidence comments, and one state document per drained run (`archon state list --prefix discoveries/runs/`) recording which of its records were decided and any question asked with its answer, so a record is decided once.
+**What it produces**: Filed issues and evidence comments, or tasks in the Archon tracker project for a tracker-primary repository, and one state document per drained run (`archon state list --prefix discoveries/runs/`) recording which of its records were decided and any question asked with its answer, so a record is decided once.
+
+#### `archon-project-intake`
+
+Turns the specifications uploaded to an Archon project's Docs into a backlog of `todo` tasks in that same project. The repository's `.factory/project.yaml` names the project, which must keep its work in the Archon tracker; there is no GitHub path. You never paste the specification into the command line or the checkout:
+
+1. Once per repository, before the first run: declare the project in the checkout's `.factory/project.yaml`, with its `archon_project_id`, `github_repo` and `tracker.primary: archon`, and set `ARCHON_TRACKER_BASE_URL` to the tracker where Archon runs. The pack README's [Archon task tracker](https://github.com/coleam00/Archon/blob/dev/.archon/workflows/sdlc/README.md#archon-task-tracker) section shows the file. Without it the run refuses before any request.
+2. Upload the specification (the CDC) from your workstation in the project's **Docs** tab, and give it the type `spec`.
+3. Run the workflow against the repository checkout, with no message: `archon workflow run archon-project-intake --cwd <checkout> --no-worktree`.
+4. The run reads every `spec` document through the tracker's API, and one agent analyses them into lots and implementation-sized tasks, each with its dependencies, acceptance criteria and the sections of the documents it rests on, plus the assumptions, open questions and risks the sources raise.
+5. The run pauses on one approval naming the documents analysed, the lots, how many tasks it would create, the assumptions and the blocking open questions. The full plan is in the run's `intake/plan.json`.
+6. `approve` creates the tasks as `todo` in the project; `reject` ends the run with nothing written.
+
+- **No documents**: the run stops before any agent runs and tells you to upload the specification with the type `spec`.
+- **A document without usable content**, such as one the Docs tab just created with its title and a placeholder line: the run stops naming it, rather than planning from guesses. A specification the agent judges too thin to plan from stops the run before the approval, with its reason.
+- **Several specifications**: every document typed `spec` is analysed as one project; contradictions between them become open questions. Documents of other types are set aside.
+- **Running again**: every task the intake creates carries a marker with its plan key, and a planned task whose key a task in the project already carries, archived or not, is recovered instead of created. The planning agent is given the tasks already there and reuses their keys for the same work; the approval says how many planned tasks already exist, so a split that would duplicate them shows before you approve. A run that failed partway through creating tasks recovers what it created when resumed. A create that fails for any reason other than the tracker's request validation error (422) may still have stored the task, so the run names that task with its marker: find it in the project before resuming, since a resumed run recovers it only if that marker survived. Two tasks carrying one key, or a damaged marker, stop the run before any write. If the specifications, the project or the tracker changed between the analysis and your approval, nothing is written: start a fresh run.
+
+**When to use it**: A project's specification is in its Archon Docs and its backlog is not split into tasks yet.
+
+**What it produces**: `todo` tasks in the declared Archon project, and the run's `intake/sources.json` and `intake/plan.json`. It never modifies the checkout.
 
 #### `archon-worktree-cleanup`
 
@@ -220,6 +240,7 @@ archon workflow run archon-upkeep "Address the undici advisory"
 | `archon-build-queue` | Work triaged issues to reviewed PRs (trigger-started) | Yes (through `archon-ship`) | Yes (through `archon-ship`) |
 | `archon-merge-queue` | Merge reviewed, green PRs the build queue finished (trigger-started) | No | No |
 | `archon-discoveries` | File, track or drop what finished runs discovered | No | No |
+| `archon-project-intake` | Split an Archon project's specifications into tracker tasks | No | No |
 | `archon-worktree-cleanup` | Remove merged worktrees on a schedule | No | No |
 | `archon-investigate` | Root-cause a bug or question | No | No |
 | `archon-plan` | Plan decided intent | No | No |

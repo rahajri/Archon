@@ -10,12 +10,21 @@
  * terminal.
  *
  * Writes `$ARTIFACTS_DIR/drain/queue.json`: the queued records, each run with the
- * questions earlier passes asked about it, for the agent and the outcome.
+ * questions earlier passes asked about it, for the agent and the outcome. When the
+ * checkout's project files discoveries into the Archon tracker, also writes
+ * `$ARTIFACTS_DIR/drain/tasks.json`: every task an earlier pass filed there, archived
+ * ones included, so the agent can reuse a filed task's key. That tracker is read before
+ * any run is claimed, so a misconfigured one stops the pass before it holds anything.
  */
 
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { declaredArchonTracker } from '../../.shared/archon-tracker.ts';
+import type { QualifiedPr } from '../../.shared/forge.ts';
 import {
+  type FilingTarget,
+  filedDiscoveries,
+  filingTargetOf,
   parseRunDocument,
   type Queue,
   type QueuedRun,
@@ -109,7 +118,29 @@ function claimUndecided<R extends { ref: string }>(
   return records.length === 0 ? null : { records, questions: document.questions ?? [] };
 }
 
-function main(): void {
+/**
+ * Where this checkout files discoveries. For the Archon tracker, also writes the tasks
+ * earlier passes filed in the project to `drain/tasks.json`, as the agent reads them.
+ */
+async function filingTarget(repo: QualifiedPr['repo']): Promise<FilingTarget> {
+  const tracker = declaredArchonTracker(process.cwd(), repo, process.env.ARCHON_TRACKER_BASE_URL);
+  if (tracker === null) return filingTargetOf(null);
+  const tasks = filedDiscoveries(await tracker.listProjectTasks()).map(({ key, refs, task }) => ({
+    key,
+    refs,
+    url: tracker.taskUrl(task.id),
+    title: task.title,
+    status: task.status,
+    archived: task.archived,
+    description: task.description,
+  }));
+  const drain = join(artifactsDir(), 'drain');
+  mkdirSync(drain, { recursive: true });
+  writeFileSync(join(drain, 'tasks.json'), `${JSON.stringify(tasks, null, 2)}\n`);
+  return filingTargetOf(tracker);
+}
+
+async function main(): Promise<void> {
   // Every input is validated before anything is read or written.
   const since = parseTime('since', trimmed(process.env.INPUTS_SINCE));
   const until = parseTime('until', trimmed(process.env.INPUTS_UNTIL));
@@ -122,6 +153,8 @@ function main(): void {
   if (repo.host === '' || repo.path === '') throw new Error('repo_host and repo_path are required');
   const self = trimmed(process.env.WORKFLOW_ID);
   if (self === '') throw new Error('WORKFLOW_ID is not set; the engine supplies it to every exec node');
+
+  const target = await filingTarget(repo);
 
   const base = fetchDefaultBranch(repo);
   const documents = readRunDocuments();
@@ -182,11 +215,12 @@ function main(): void {
     path: queue.length === 0 ? 'idle' : 'decide',
     base,
     policy_defaults: POLICY_DEFAULTS,
+    ...target,
   });
 }
 
 try {
-  main();
+  await main();
 } catch (error) {
   refuse(`discoveries facts: ${error instanceof Error ? error.message : String(error)}`);
 }

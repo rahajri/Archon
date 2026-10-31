@@ -8,13 +8,19 @@
  * a pass works it, and while one of its questions waits.
  *
  * There is no store of decisions across runs. A defect a later run finds again is judged
- * again, against the tracker: a filed issue carries the key's marker, so filing the same
- * key twice recovers the issue instead of opening another.
+ * again, against the tracker: a filed issue or task carries the key's marker, so filing
+ * the same key twice recovers it instead of opening another. A task also records the refs
+ * it was filed for, so a pass that decides those refs again recovers it whatever key the
+ * agent gives it this time.
  */
 
+import { isDeepStrictEqual } from 'node:util';
+import { type ArchonTask, type ArchonTracker, trackerBaseUrl } from './archon-tracker.ts';
 import type { QualifiedPr } from './forge.ts';
+import type { TrackerKind } from './project-context.ts';
 import type { fetchDefaultBranch } from './remote.ts';
 import type { DiscoveryRecord } from './report.ts';
+import { opensTaskMetadata } from './task-metadata.ts';
 import { isObject } from './typed.ts';
 
 export const RUNS_PREFIX = 'discoveries/runs/';
@@ -172,8 +178,167 @@ export function checkDecisions(queued: readonly string[], decisions: readonly Ag
   return problems;
 }
 
-/** The marker on a filed issue's first line, and on an evidence comment's. */
+/**
+ * Where a pass files: GitHub issues, or tasks in one Archon tracker project on one tracker
+ * instance, named by its normalized base URL. `facts` chooses it and carries every field
+ * on its output, so the outcome, a resumed one too, files where the agent searched.
+ */
+export type FilingTarget = { readonly [T in TrackerKind]: { readonly tracker: T } & FilingFields[T] }[TrackerKind];
+
+interface FilingFields {
+  readonly github: { readonly archon_project_id: ''; readonly tracker_base_url: '' };
+  readonly archon: { readonly archon_project_id: string; readonly tracker_base_url: string };
+}
+
+/** A target's fields as the workflow carries them: one string each, unvalidated. */
+export type FilingTargetFields = { readonly [F in keyof FilingTarget]: string };
+
+/** Whether a carried base URL is one `trackerBaseUrl` accepted and normalized, so it carries no secret. */
+function isTrackerBaseUrl(value: string): boolean {
+  try {
+    return trackerBaseUrl(value).href === value;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Each tracker a target can name, with the target its other fields make of it. Every
+ * `FilingTarget` is built here. The mapped type requires an entry for every `TrackerKind`,
+ * and the workflow's tracker enum and carried fields are held to these by
+ * `discoveries.test.ts`.
+ */
+const FILING_TARGETS: { readonly [T in TrackerKind]: (fields: FilingTargetFields) => FilingTarget | null } = {
+  github: ({ archon_project_id, tracker_base_url }) =>
+    archon_project_id === '' && tracker_base_url === '' ? { tracker: 'github', archon_project_id: '', tracker_base_url: '' } : null,
+  archon: ({ archon_project_id, tracker_base_url }) =>
+    archon_project_id !== '' && isTrackerBaseUrl(tracker_base_url) ? { tracker: 'archon', archon_project_id, tracker_base_url } : null,
+};
+
+export const FILING_TRACKERS: readonly string[] = Object.keys(FILING_TARGETS);
+
+function isFilingTracker(tracker: string): tracker is TrackerKind {
+  return Object.hasOwn(FILING_TARGETS, tracker);
+}
+
+/** The target carried fields name. A refusal does not quote the base URL, which may hold a secret. */
+export function parseFilingTarget(fields: FilingTargetFields): FilingTarget {
+  const target = isFilingTracker(fields.tracker) ? FILING_TARGETS[fields.tracker](fields) : null;
+  if (target === null) {
+    throw new Error(
+      `"${fields.tracker}" with Archon project "${fields.archon_project_id}" and the carried tracker base URL is not a filing target`
+    );
+  }
+  return target;
+}
+
+/** The target a checkout's declared tracker files into: GitHub issues when it declares none. */
+export function filingTargetOf(tracker: ArchonTracker | null): FilingTarget {
+  return parseFilingTarget(
+    tracker === null
+      ? { tracker: 'github', archon_project_id: '', tracker_base_url: '' }
+      : { tracker: 'archon', archon_project_id: tracker.context.archonProjectId, tracker_base_url: tracker.baseUrl.href }
+  );
+}
+
+/** Whether two targets file into the same place, compared on every field they carry. */
+export function sameFilingTarget(a: FilingTarget, b: FilingTarget): boolean {
+  return isDeepStrictEqual(a, b);
+}
+
+export function describeFilingTarget(target: FilingTarget): string {
+  switch (target.tracker) {
+    case 'github':
+      return 'GitHub issues';
+    case 'archon':
+      return `Archon tracker project ${target.archon_project_id} at ${target.tracker_base_url}`;
+    default:
+      return target satisfies never;
+  }
+}
+
+const MARKER_OPEN = '<!-- archon-discovery ';
+const REFS_OPEN = '<!-- archon-discovery-refs ';
+const COMMENT_CLOSE = ' -->';
+/**
+ * Whether a line opens an archon-discovery comment in any spacing or case. A description
+ * that holds one anywhere but the canonical header is corrupt metadata, never an
+ * unrelated task: read as no filing, its discovery would be filed a second time.
+ */
+const isMetadata = (text: string): boolean => opensTaskMetadata('archon-discovery', text);
+
+/** The marker on a filed issue's or task's first line, and on an evidence comment's. */
 export function discoveryMarker(key: string): string {
   if (!isKey(key)) throw new Error(`"${key}" is not a decision key`);
-  return `<!-- archon-discovery ${key} -->`;
+  return `${MARKER_OPEN}${key}${COMMENT_CLOSE}`;
+}
+
+/** The line after a filed task's marker: the queued refs it was filed for. `>` is escaped so no ref closes the comment. */
+export function discoveryRefsLine(refs: readonly string[]): string {
+  return `${REFS_OPEN}${JSON.stringify(refs).replaceAll('>', '\\u003e')}${COMMENT_CLOSE}`;
+}
+
+/** A tracker task this workflow filed: its marker's key and the refs it was filed for. */
+export interface FiledDiscovery {
+  readonly key: string;
+  /** Empty for a task filed before tasks recorded their refs. */
+  readonly refs: readonly string[];
+  readonly task: ArchonTask;
+}
+
+function corrupt(task: ArchonTask, why: string): never {
+  throw new Error(`task ${task.id} carries corrupt archon-discovery metadata: ${why}`);
+}
+
+/** The payload of a canonical metadata line opening with `open`. */
+function payload(task: ArchonTask, line: string, open: string, what: string): string {
+  if (!line.startsWith(open) || !line.endsWith(COMMENT_CLOSE)) corrupt(task, `its ${what} line is not canonical`);
+  return line.slice(open.length, -COMMENT_CLOSE.length);
+}
+
+function refsOf(task: ArchonTask, line: string): string[] {
+  const refs = payload(task, line, REFS_OPEN, 'refs');
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(refs);
+  } catch {
+    parsed = undefined;
+  }
+  if (!Array.isArray(parsed) || parsed.length === 0 || !parsed.every(isQualifiedRef)) {
+    corrupt(task, 'its refs line is not a list of qualified refs');
+  }
+  return parsed;
+}
+
+/**
+ * The filing a task's description records, or null when it holds no discovery metadata.
+ * The canonical header is the marker on the first line, then optionally the refs line;
+ * a marker-only task was filed before tasks recorded their refs.
+ */
+function filedDiscovery(task: ArchonTask): FiledDiscovery | null {
+  const description = task.description ?? '';
+  if (!isMetadata(description)) return null;
+  const [first = '', second = '', ...rest] = description.split(/\r?\n/);
+  const key = payload(task, first, MARKER_OPEN, 'marker');
+  if (!isKey(key)) corrupt(task, 'its marker does not carry a decision key');
+  const refs = isMetadata(second) ? refsOf(task, second) : [];
+  const brief = refs.length === 0 ? [second, ...rest] : rest;
+  if (brief.some(isMetadata)) corrupt(task, 'it carries discovery metadata after its header');
+  return { key, refs, task };
+}
+
+/**
+ * The tasks a discoveries pass filed. A task whose discovery metadata is corrupt refuses
+ * the read rather than matching nothing.
+ */
+export function filedDiscoveries(tasks: readonly ArchonTask[]): FiledDiscovery[] {
+  return tasks.flatMap(task => filedDiscovery(task) ?? []);
+}
+
+/**
+ * The filed tasks a `file` decision is: the one carrying its key's marker, and any filed
+ * for one of its refs. More than one is a conflict for the caller to refuse.
+ */
+export function filingsOf(filed: readonly FiledDiscovery[], decision: { key: string; refs: readonly string[] }): FiledDiscovery[] {
+  return filed.filter(entry => entry.key === decision.key || entry.refs.some(ref => decision.refs.includes(ref)));
 }

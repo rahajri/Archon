@@ -5,11 +5,13 @@ description: |
   verifies every record against the default branch, merges duplicates across runs
   and with earlier decisions, and decides each one: file an issue with a full brief,
   track it on the open issue that already covers it (with a marked evidence comment
-  only when it adds something), drop it with a reason, or ask a maintainer. The nodes
-  after the agent perform only the writes it declared and read them back. Each
+  only when it adds something), drop it with a reason, or ask a maintainer. A project
+  whose .factory/project.yaml names the Archon task tracker as primary files a todo
+  task in its tracker project instead of an issue, and tracks nothing on GitHub. The
+  nodes after the agent perform only the writes it declared and read them back. Each
   drained run's state document records the refs decided for it and any question
-  asked with its answer, so a record is decided once; a filed issue carries its
-  key's marker, so filing a key again recovers that issue.
+  asked with its answer, so a record is decided once; a filed issue or task carries
+  its key's marker, and a task its refs, so filing again recovers it.
 
   Use when: an operator drains discoveries by hand, or a schedule binding the
   operator installed starts it (see the SDLC pack README, "Discoveries"). The pack
@@ -55,7 +57,16 @@ nodes:
             sha: { type: string }
           required: [branch, sha]
         policy_defaults: { type: string }
-      required: [path, base, policy_defaults]
+        # Where a filing goes: a GitHub issue, or a task in the Archon tracker project
+        # the checkout's .factory/project.yaml declares, whose id is archon_project_id,
+        # on the tracker at tracker_base_url, ARCHON_TRACKER_BASE_URL as facts accepted
+        # and normalized it (both empty for github). The outcome files there and refuses
+        # a checkout whose project or tracker URL no longer names it, a resumed pass
+        # included.
+        tracker: { type: string, enum: [github, archon] }
+        archon_project_id: { type: string }
+        tracker_base_url: { type: string }
+      required: [path, base, policy_defaults, tracker, archon_project_id, tracker_base_url]
 
   # Reads code at the base commit with git show and git grep; the checkout stays as
   # it was. The engine fails this node if the agent modifies it.
@@ -70,6 +81,7 @@ nodes:
       base_sha: "$facts.output.base.sha"
       repo_host: "$INPUTS.repo_host"
       repo_path: "$INPUTS.repo_path"
+      tracker: "$facts.output.tracker"
     output_format:
       type: object
       properties:
@@ -139,14 +151,18 @@ nodes:
     trigger_rule: none_failed_min_one_success
     with:
       path: "$facts.output.path"
+      tracker: "$facts.output.tracker"
+      archon_project_id: "$facts.output.archon_project_id"
+      tracker_base_url: "$facts.output.tracker_base_url"
       decisions: { from: "$decide.output.decisions", if_skipped: null }
       summary: { from: "$decide.output.summary", if_skipped: null }
     output_format:
       type: object
       properties:
         summary: { type: string }
-        # Issues filed or recovered, and issues a discovery is tracked by (the
-        # evidence comment's URL when one was posted).
+        # Issues filed or recovered (the task's tracker API URL when the project
+        # files into the Archon tracker), and issues a discovery is tracked by (the
+        # evidence comment's URL when one was posted; never on the tracker path).
         written:
           type: array
           items:

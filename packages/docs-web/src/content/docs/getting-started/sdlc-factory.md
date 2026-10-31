@@ -158,14 +158,15 @@ The pack's README has a binding for each queue: [Intake](https://github.com/cole
 
 ## What the pack writes
 
-Everything below is written as the `gh` account, to the repository the queues name.
+Everything below is written as the `gh` account, to the repository the queues name, with one exception: a repository whose `.factory/project.yaml` names the Archon task tracker as primary gets tasks in that tracker project, over HTTP to `ARCHON_TRACKER_BASE_URL`, from two workflows. Its discoveries become tasks there, with no issue or comment for them, and `archon-project-intake`, after you approve its proposal, creates the backlog it planned from the project's uploaded specifications there. The pack README's [Archon task tracker](https://github.com/coleam00/Archon/blob/dev/.archon/workflows/sdlc/README.md#archon-task-tracker) section covers the setup.
 
 | Where | What | Who |
 |---|---|---|
 | Labels | Creates the pack's own `archon-*` labels when missing. Adds and removes them on issues as a delta, so labels others add survive | Intake; `archon-triage` with `--input publish=true` |
 | Issues | Closes a duplicate of an open issue, or an issue a merged change already delivered, with one comment linking the cause, and a link-back comment on the original. Intake closes issues by triage verdict, as `triage.md` allows, and a merged pull request closes the issue it names with `Closes #N` | Intake; merges |
 | Issue bodies | Appends a dated "Current scope" section with your answer | Build queue, merge queue |
-| New issues | Files an issue for a verified discovery, marked so a rerun never files it twice. Adds one evidence comment to an open issue it tracks | Discoveries |
+| New issues | Files an issue for a verified discovery, marked so a rerun never files it twice. Adds one evidence comment to an open issue it tracks. A tracker-primary repository gets a `todo` task in its Archon tracker project instead | Discoveries |
+| Archon tracker tasks | Creates one `todo` task per planned task, after you approve the proposal, in the project `.factory/project.yaml` names, marked so a rerun recovers it instead of creating it twice | `archon-project-intake` |
 | Branches | Pushes `build/<issue>-<slug>-<run>`, or pushes onto an open pull request's existing head. Never force-pushes or rebases | Build queue rounds |
 | Pull requests | Opens a draft, updates its description, posts one review comment and edits it in place, replies to and resolves review threads, marks it ready and back to draft. The description says `Closes #N` only when the review found every acceptance item met. Before merging, the merge queue changes `Refs #N` to `Closes #N` when the Ready review left nothing open, and changes it back if the merge doesn't land | Build queue rounds; merge queue |
 | CI | Reruns the failed jobs of a run once, when red is outside the change or on the default branch | Build queue rounds, merge queue |
