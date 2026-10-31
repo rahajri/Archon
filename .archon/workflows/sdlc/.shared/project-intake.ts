@@ -547,7 +547,6 @@ export function intakeTaskDescription(task: PlannedTask, file: IntakePlanFile): 
   return `${intakeMarker(task.key)}\n${body}`;
 }
 
-
 /**
  * Create each planned task the project does not already hold, dependencies first. A task
  * an earlier run created is recovered by its marker, archived or not, and left as it is.
