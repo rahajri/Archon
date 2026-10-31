@@ -1,8 +1,8 @@
 /**
  * Capture the part of the Archon task tracker's OpenAPI document the SDLC pack's tracker
- * client (`.archon/workflows/sdlc/.shared/archon-tracker.ts`) calls: the operations it
- * sends and the schemas their request bodies name. `archon-tracker.test.ts` holds every
- * request the client sends against this capture, so a client change that leaves the
+ * clients (`.archon/workflows/sdlc/.shared/archon-tracker.ts` and `archon-docs.ts`) call:
+ * the operations they send and the schemas their request bodies name. `archon-tracker.test.ts` holds every
+ * request the clients send against this capture, so a client change that leaves the
  * contract fails there, and `--check` against a running tracker shows when the service
  * moved away from the capture.
  *
@@ -16,11 +16,14 @@ import { isObject } from '../workflows/sdlc/.shared/typed.ts';
 
 export const CAPTURE = resolve(import.meta.dir, '__tests__/fixtures/archon-tracker-openapi.json');
 
-/** The operations the client sends, as `[path, method]`. */
+/** The operations the clients send, as `[path, method]`. */
 const OPERATIONS = [
   ['/api/tasks', 'post'],
   ['/api/tasks/{task_id}', 'get'],
   ['/api/projects/{project_id}/tasks', 'get'],
+  ['/api/projects/{project_id}', 'get'],
+  ['/api/projects/{project_id}/docs', 'get'],
+  ['/api/projects/{project_id}/docs/{doc_id}', 'get'],
 ] as const;
 
 const SCHEMA_REF = '#/components/schemas/';

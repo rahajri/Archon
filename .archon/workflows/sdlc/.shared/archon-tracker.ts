@@ -7,10 +7,10 @@
  * issue write. Every task it lists or creates is in the context's `archonProjectId`;
  * the tracker cannot be built without one, so there is no project to fall back to.
  *
- * The request shapes here are the subset of the tracker's OpenAPI document this pack
- * uses; `.archon/scripts/__tests__/archon-tracker.test.ts` holds them against a capture
- * of that document. Its response bodies are untyped there, so `taskOf` checks the
- * fields this pack reads.
+ * The request shapes here and in ./archon-docs.ts are the subset of the tracker's
+ * OpenAPI document this pack uses; `.archon/scripts/__tests__/archon-tracker.test.ts`
+ * holds them against a capture of that document. Its response bodies are untyped there,
+ * so `taskOf` checks the fields this pack reads.
  */
 
 import { type QualifiedPr, sameRepo } from './forge.ts';
@@ -120,8 +120,9 @@ export class ArchonTracker {
   /**
    * Create a task in the project and return its id, once the tracker reads back every
    * field of the request as it was sent. A task stored any other way is refused, not
-   * reported as filed: what a later pass makes of it depends on what survived, since it
-   * recovers a task by the archon-discovery header in its description, in this project.
+   * reported as filed: what a later pass makes of it depends on what survived, since
+   * each workflow that files here recovers a task by the marker on its description's
+   * first line, in this project.
    */
   async createTask(task: NewArchonTask): Promise<string> {
     const sent = { ...task, project_id: this.context.archonProjectId };
@@ -138,20 +139,32 @@ export class ArchonTracker {
     const altered = Object.entries(sent).flatMap(([field, value]) => (stored[field] === value ? [] : [field]));
     if (altered.length > 0) {
       throw new ArchonTrackerError(
-        `the tracker created task ${created.id} but reads back a different ${altered.join(', ')} than was sent, so it is not reported as filed. Check it before running again: a later pass recovers it as filed if its archon-discovery header is intact and it is in project ${this.context.archonProjectId}.`,
+        `the tracker created task ${created.id} but reads back a different ${altered.join(', ')} than was sent, so it is not reported as filed. Check it before running again: a later pass recovers it as filed if the marker on its description's first line is intact and it is in project ${this.context.archonProjectId}.`,
         null
       );
     }
     return created.id;
   }
 
-  /** Every task in the project, archived ones included: the tracker leaves those out unless asked. */
+  /**
+   * Every task in the project, archived ones included: the tracker leaves those out unless
+   * asked. A listed task from another project is refused, since a caller recovers its own
+   * filings from this list and must never take another project's task for one.
+   */
   async listProjectTasks(): Promise<ArchonTask[]> {
     const url = this.url(`api/projects/${encodeURIComponent(this.context.archonProjectId)}/tasks`);
     url.searchParams.set('include_archived', 'true');
     const body = await this.request('GET', url);
     if (!Array.isArray(body)) throw new ArchonTrackerError('the task list is not an array.', null);
-    return body.map(taskOf);
+    const tasks = body.map(taskOf);
+    const foreign = tasks.find(task => task.project_id !== this.context.archonProjectId);
+    if (foreign !== undefined) {
+      throw new ArchonTrackerError(
+        `the tracker lists task ${foreign.id} of project ${foreign.project_id} among project ${this.context.archonProjectId}'s tasks.`,
+        null
+      );
+    }
+    return tasks;
   }
 
   /** The task's address on the tracker's API; the tracker has no other link to a task. */
@@ -163,27 +176,40 @@ export class ArchonTracker {
     return new URL(path, this.baseUrl);
   }
 
-  private async request(method: 'GET' | 'POST', url: URL, body?: unknown): Promise<unknown> {
-    const where = `${method} ${url.pathname}`;
-    let response: Response;
-    try {
-      response = await this.fetchImpl(url, {
-        method,
-        headers: body === undefined ? undefined : { 'Content-Type': 'application/json' },
-        body: body === undefined ? undefined : JSON.stringify(body),
-      });
-    } catch (error) {
-      throw new ArchonTrackerError(`${where}: the tracker at ${url.origin} is unreachable.`, null, { cause: error });
-    }
-    const text = await response.text();
-    if (!response.ok) {
-      throw new ArchonTrackerError(`${where} failed with ${String(response.status)}: ${text.slice(0, 2000)}`, response.status);
-    }
-    try {
-      return JSON.parse(text) as unknown;
-    } catch (error) {
-      throw new ArchonTrackerError(`${where} returned a body that is not JSON.`, response.status, { cause: error });
-    }
+  private request(method: 'GET' | 'POST', url: URL, body?: unknown): Promise<unknown> {
+    return trackerRequest(this.fetchImpl, method, url, body);
+  }
+}
+
+/**
+ * One JSON request to the tracker. `url` is built on a base `trackerBaseUrl` accepted, so
+ * its origin and path may be printed; a failure says which request failed and how.
+ */
+export async function trackerRequest(
+  fetchImpl: typeof fetch,
+  method: 'GET' | 'POST',
+  url: URL,
+  body?: unknown
+): Promise<unknown> {
+  const where = `${method} ${url.pathname}`;
+  let response: Response;
+  try {
+    response = await fetchImpl(url, {
+      method,
+      headers: body === undefined ? undefined : { 'Content-Type': 'application/json' },
+      body: body === undefined ? undefined : JSON.stringify(body),
+    });
+  } catch (error) {
+    throw new ArchonTrackerError(`${where}: the tracker at ${url.origin} is unreachable.`, null, { cause: error });
+  }
+  const text = await response.text();
+  if (!response.ok) {
+    throw new ArchonTrackerError(`${where} failed with ${String(response.status)}: ${text.slice(0, 2000)}`, response.status);
+  }
+  try {
+    return JSON.parse(text) as unknown;
+  } catch (error) {
+    throw new ArchonTrackerError(`${where} returned a body that is not JSON.`, response.status, { cause: error });
   }
 }
 

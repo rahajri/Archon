@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { trackTempRoots } from './temp-roots';
 import { CAPTURE } from '../archon-tracker-openapi';
+import { ArchonProjectDocs } from '../../workflows/sdlc/.shared/archon-docs';
 import {
   ArchonTracker,
   ArchonTrackerError,
@@ -316,7 +317,7 @@ describe('ArchonTracker', () => {
   ])('refuses a created task the tracker %s, naming the field and the task', async (_case, changes, field) => {
     const { tracker } = trackerWith(json({ task: task('t1') }), json(stored(changes)));
     await expect(tracker.createTask(newTask)).rejects.toThrow(
-      `the tracker created task t1 but reads back a different ${field} than was sent, so it is not reported as filed. Check it before running again: a later pass recovers it as filed if its archon-discovery header is intact and it is in project ${PROJECT_ID}.`
+      `the tracker created task t1 but reads back a different ${field} than was sent, so it is not reported as filed. Check it before running again: a later pass recovers it as filed if the marker on its description's first line is intact and it is in project ${PROJECT_ID}.`
     );
   });
 
@@ -350,6 +351,13 @@ describe('ArchonTracker', () => {
       throw new TypeError('connection refused');
     }) as unknown as typeof fetch);
     await expect(tracker.listProjectTasks()).rejects.toThrow(`the tracker at ${BASE} is unreachable`);
+  });
+
+  test("refuses a listing that holds another project's task, which a caller would take for its own", async () => {
+    const { tracker } = trackerWith(json([task('t1'), task('t2', '00000000-0000-4000-8000-000000000000')]));
+    await expect(tracker.listProjectTasks()).rejects.toThrow(
+      `the tracker lists task t2 of project 00000000-0000-4000-8000-000000000000 among project ${PROJECT_ID}'s tasks.`
+    );
   });
 
   test('refuses a response that is not a task, or a listed task without its archived flag', async () => {
@@ -446,6 +454,25 @@ describe("the tracker's contract", () => {
     await tracker?.createTask(created);
 
     expect(sent.map(request => request.method)).toEqual(['GET', 'POST', 'GET']);
+    expect(sent.map(contractProblems)).toEqual([[], [], []]);
+  });
+
+  test('every request the documents client sends is one the captured OpenAPI document declares', async () => {
+    const doc = { id: 'd1', title: 'Spec', document_type: 'spec', content: { markdown: '# Spec' } };
+    const { fetch, sent } = fakeFetch(
+      json({ id: PROJECT_ID, title: 'BAREA', docs: [doc] }),
+      json({ project_id: PROJECT_ID, documents: [{ id: 'd1', title: 'Spec', document_type: 'spec' }], total_count: 1 }),
+      json(doc)
+    );
+    const docs = new ArchonProjectDocs(readProjectContext(checkout(ARCHON_PROJECT)) as ArchonProjectContext, trackerBaseUrl(BASE), fetch);
+    await docs.readProject();
+    await docs.readDocuments();
+
+    expect(sent.map(request => `${request.method} ${new URL(request.url).pathname}`)).toEqual([
+      `GET /api/projects/${PROJECT_ID}`,
+      `GET /api/projects/${PROJECT_ID}/docs`,
+      `GET /api/projects/${PROJECT_ID}/docs/d1`,
+    ]);
     expect(sent.map(contractProblems)).toEqual([[], [], []]);
   });
 

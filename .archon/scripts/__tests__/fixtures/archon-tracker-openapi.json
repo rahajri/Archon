@@ -66,6 +66,73 @@
         ],
         "requestBody": null
       }
+    },
+    "/api/projects/{project_id}": {
+      "get": {
+        "parameters": [
+          {
+            "name": "project_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Project Id"
+            }
+          }
+        ],
+        "requestBody": null
+      }
+    },
+    "/api/projects/{project_id}/docs": {
+      "get": {
+        "parameters": [
+          {
+            "name": "project_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Project Id"
+            }
+          },
+          {
+            "name": "include_content",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "boolean",
+              "default": false,
+              "title": "Include Content"
+            }
+          }
+        ],
+        "requestBody": null
+      }
+    },
+    "/api/projects/{project_id}/docs/{doc_id}": {
+      "get": {
+        "parameters": [
+          {
+            "name": "project_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Project Id"
+            }
+          },
+          {
+            "name": "doc_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Doc Id"
+            }
+          }
+        ],
+        "requestBody": null
+      }
     }
   },
   "components": {
