@@ -10,6 +10,7 @@ import {
   ArchonTrackerError,
   declaredArchonTracker,
   trackerBaseUrl,
+  UnconfirmedTaskError,
 } from '../../workflows/sdlc/.shared/archon-tracker';
 import { isObject } from '../../workflows/sdlc/.shared/typed';
 import {
@@ -327,9 +328,12 @@ describe('ArchonTracker', () => {
     await expect(tracker.createTask(sentWithMore)).rejects.toThrow('reads back a different assignee than was sent');
   });
 
-  test('refuses a created task that does not read back as a task', async () => {
+  test('refuses a created task that does not read back as a task, as unconfirmed with its id', async () => {
     const { tracker } = trackerWith(json({ task: task('t1') }), new Response('{"detail":"Task not found"}', { status: 404 }));
-    await expect(tracker.createTask(newTask)).rejects.toThrow('GET /api/tasks/t1 failed with 404');
+    const error = await tracker.createTask(newTask).catch((caught: unknown) => caught);
+    expect(error).toBeInstanceOf(UnconfirmedTaskError);
+    expect((error as UnconfirmedTaskError).taskId).toBe('t1');
+    expect((error as Error).message).toContain('the tracker created task t1 but did not read it back: GET /api/tasks/t1 failed with 404');
     const { tracker: listing } = trackerWith(json({ task: task('t1') }), json([stored()]));
     await expect(listing.createTask(newTask)).rejects.toThrow('the tracker reads back task t1 as something that is not a task');
   });
@@ -338,12 +342,28 @@ describe('ArchonTracker', () => {
     [422, '{"detail":[{"msg":"Field required"}]}'],
     [404, '{"detail":"Project not found"}'],
     [500, 'Internal Server Error'],
-  ])('reports a %i response with its status and body', async (status, body) => {
+  ])('reports a %i response with its status and body, as a refusal', async (status, body) => {
     const { tracker } = trackerWith(new Response(body, { status }));
     const error = await tracker.createTask(newTask).catch((caught: unknown) => caught);
     expect(error).toBeInstanceOf(ArchonTrackerError);
+    expect(error).not.toBeInstanceOf(UnconfirmedTaskError);
     expect((error as ArchonTrackerError).status).toBe(status);
     expect((error as ArchonTrackerError).message).toContain(body);
+  });
+
+  test.each([
+    ['gets no answer', (async () => {
+      throw new TypeError('socket hang up');
+    }) as unknown as typeof fetch, `POST /api/tasks: the tracker at ${BASE} is unreachable.`],
+    ['gets an answer that is not JSON', (async () => new Response('<html>ok</html>', { status: 201 })) as unknown as typeof fetch, 'POST /api/tasks returned a body that is not JSON.'],
+    ['gets an answer that is not a task', (async () => json({ message: 'ok' })) as unknown as typeof fetch, "the tracker's create response is not a task"],
+  ])('a creation that %s may have stored a task, so it is unconfirmed rather than refused', async (_case, fetchImpl, why) => {
+    const tracker = new ArchonTracker(context, trackerBaseUrl(BASE), fetchImpl);
+    const error = await tracker.createTask(newTask).catch((caught: unknown) => caught);
+    expect(error).toBeInstanceOf(UnconfirmedTaskError);
+    expect((error as UnconfirmedTaskError).taskId).toBeNull();
+    expect((error as Error).message).toStartWith(why);
+    expect((error as Error).message).toContain(`The tracker may have stored the task: look for it in project ${PROJECT_ID} before running again`);
   });
 
   test('reports an unreachable tracker by its origin', async () => {

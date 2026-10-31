@@ -46,6 +46,22 @@ export class ArchonTrackerError extends Error {
 }
 
 /**
+ * A task creation the tracker may have stored but that is not confirmed as sent: the
+ * request got no answer or one that could not be read, or the task did not read back as
+ * it was sent. `taskId` is the stored task's id when the tracker returned one.
+ */
+export class UnconfirmedTaskError extends ArchonTrackerError {
+  constructor(
+    message: string,
+    readonly taskId: string | null,
+    options?: ErrorOptions
+  ) {
+    super(message, null, options);
+    this.name = 'UnconfirmedTaskError';
+  }
+}
+
+/**
  * The tracker's base URL from its configured value (`ARCHON_TRACKER_BASE_URL`).
  * There is no default: an unset or malformed value is refused rather than guessed. A
  * value carrying credentials (userinfo), a query or a fragment, even an empty one, is
@@ -119,31 +135,49 @@ export class ArchonTracker {
 
   /**
    * Create a task in the project and return its id, once the tracker reads back every
-   * field of the request as it was sent. A task stored any other way is refused, not
-   * reported as filed: what a later pass makes of it depends on what survived, since
-   * each workflow that files here recovers a task by the marker on its description's
-   * first line, in this project.
+   * field of the request as it was sent. A refusal is an `ArchonTrackerError` only when
+   * the tracker answered the create with an error status, so it holds no such task;
+   * every other failure is an `UnconfirmedTaskError`, since the task may be stored. What
+   * a later pass makes of one depends on what survived: each workflow that files here
+   * recovers a task by the marker on its description's first line, in this project.
    */
   async createTask(task: NewArchonTask): Promise<string> {
     const sent = { ...task, project_id: this.context.archonProjectId };
-    const body = await this.request('POST', this.url('api/tasks'), sent);
+    let body: unknown;
+    try {
+      body = await this.request('POST', this.url('api/tasks'), sent);
+    } catch (error) {
+      if (error instanceof ArchonTrackerError && error.status !== null && (error.status < 200 || error.status > 299)) throw error;
+      throw this.unconfirmed(null, error instanceof Error ? error.message : String(error), error);
+    }
     const created = isObject(body) ? body.task : undefined;
     if (!isObject(created) || typeof created.id !== 'string') {
-      throw new ArchonTrackerError(`the tracker's create response is not a task: ${JSON.stringify(body).slice(0, 500)}`, null);
+      throw this.unconfirmed(null, `the tracker's create response is not a task: ${JSON.stringify(body).slice(0, 500)}`);
     }
-    const stored = await this.request('GET', new URL(this.taskUrl(created.id)));
+    const id = created.id;
+    let stored: unknown;
+    try {
+      stored = await this.request('GET', new URL(this.taskUrl(id)));
+    } catch (error) {
+      throw this.unconfirmed(id, `the tracker created task ${id} but did not read it back: ${error instanceof Error ? error.message : String(error)}`, error);
+    }
     if (!isObject(stored)) {
-      const excerpt = JSON.stringify(stored).slice(0, 500);
-      throw new ArchonTrackerError(`the tracker reads back task ${created.id} as something that is not a task: ${excerpt}`, null);
+      throw this.unconfirmed(id, `the tracker reads back task ${id} as something that is not a task: ${JSON.stringify(stored).slice(0, 500)}`);
     }
     const altered = Object.entries(sent).flatMap(([field, value]) => (stored[field] === value ? [] : [field]));
     if (altered.length > 0) {
-      throw new ArchonTrackerError(
-        `the tracker created task ${created.id} but reads back a different ${altered.join(', ')} than was sent, so it is not reported as filed. Check it before running again: a later pass recovers it as filed if the marker on its description's first line is intact and it is in project ${this.context.archonProjectId}.`,
-        null
-      );
+      throw this.unconfirmed(id, `the tracker created task ${id} but reads back a different ${altered.join(', ')} than was sent, so it is not reported as filed.`);
     }
-    return created.id;
+    return id;
+  }
+
+  private unconfirmed(taskId: string | null, what: string, cause?: unknown): UnconfirmedTaskError {
+    const project = this.context.archonProjectId;
+    const check =
+      taskId === null
+        ? `The tracker may have stored the task: look for it in project ${project} before running again, since a later pass recovers it as filed only if the marker on its description's first line is intact.`
+        : `Check it before running again: a later pass recovers it as filed if the marker on its description's first line is intact and it is in project ${project}.`;
+    return new UnconfirmedTaskError(`${what} ${check}`, taskId, cause === undefined ? undefined : { cause });
   }
 
   /**
