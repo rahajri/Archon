@@ -33,4 +33,4 @@ When the sources do not specify enough to plan from at all — they hold a title
 
 ## Declare
 
-`status`, `reason` (empty when ready), `objective`, `scope` (`included`, `excluded`), `assumptions`, `constraints`, `lots`, `tasks`, `open_questions` and `risks`. Never write an HTML comment starting `<!-- archon-` in any text: those markers are the workflow's, and the next node refuses a plan that holds one.
+`status`, `reason` (empty when ready), `objective`, `scope` (`included`, `excluded`), `assumptions`, `constraints`, `lots`, `tasks`, `open_questions` and `risks`. Never write an `<!-- archon-project-intake` or `<!-- archon-discovery` comment in any text, not even quoted from a source: those are the markers Factory workflows keep on the project's tasks, and the next node refuses a plan that holds one. Other HTML comments are ordinary text.
