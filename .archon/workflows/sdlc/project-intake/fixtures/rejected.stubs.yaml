@@ -1,0 +1,33 @@
+# Dry-run fixture: the operator rejects the proposed split; the run ends cancelled and
+# the create node, the only one that writes to the tracker, never runs.
+sources:
+  project_id: "00000000-0000-4000-8000-000000000001"
+  documents: 1
+  fingerprint: "stub-fingerprint"
+plan:
+  status: ready
+  reason: ""
+  objective: "stub: the objective"
+  scope: { included: ["stub: in"], excluded: [] }
+  assumptions: []
+  constraints: []
+  lots: [{ key: stub-lot, title: "stub: a lot", summary: "stub: its summary" }]
+  tasks:
+    - key: stub-task
+      lot: stub-lot
+      title: "stub: a task"
+      description: "stub: what to build"
+      priority: high
+      dependencies: []
+      acceptance_criteria: ["stub: it works"]
+      source_refs: [{ document_id: stub-doc, location: "stub: section 1" }]
+  open_questions: []
+  risks: []
+proposal:
+  question: "stub: create 1 task in 1 lot?"
+  lots: 1
+  tasks: 1
+approve: { decision: reject, text: "stub: split it differently" }
+fixture:
+  expect: cancelled
+  reached: [sources, plan, proposal, approve]

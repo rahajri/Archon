@@ -184,9 +184,10 @@ nothing acts on it yet.
 archived ones included, and creates tasks in it with the context's `archon_project_id`
 as their `project_id`. A created task is read back, and one that differs in any field
 sent (its project, title, description or status) is refused rather than reported as
-filed. The refusal names the task: a later pass recovers it as filed if its
-archon-discovery header survived and it is in the project, so check it before running
-again. It reaches the tracker at `ARCHON_TRACKER_BASE_URL`, set in the environment
+filed. The refusal names the task: a later pass recovers it as filed if the marker on
+its description's first line survived and it is in the project, so check it before
+running again. A task list holding another project's task is refused too, since each
+workflow recovers its own filings from that list. It reaches the tracker at `ARCHON_TRACKER_BASE_URL`, set in the environment
 Archon runs with, for example `ARCHON_TRACKER_BASE_URL=http://127.0.0.1:8181` in
 `~/.archon/.env`. There is no default. A value with credentials (userinfo), a query or
 a fragment, even an empty `?` or `#`, is refused, and no refusal quotes the value or any part of it, since it may
@@ -211,8 +212,15 @@ subset into the pack's tests, which hold every request the client sends against 
 run it with `--check` and `ARCHON_TRACKER_BASE_URL` set to see whether a running
 tracker still matches the capture, and without `--check` to refresh it.
 
-[Discoveries](#discoveries) are the one work item filed there today: a project that
-declares the Archon tracker gets a `todo` task where it would otherwise get an issue.
+[`.shared/archon-docs.ts`](.shared/archon-docs.ts) reads the documents attached to the
+same project, what an operator uploads in its Docs tab: the project, its document list,
+and each document in full by its id, refusing a response for another project or
+document. A refusal describes a document by its id and field names, never its content.
+
+Two workflows file there: [discoveries](#discoveries), where a project that declares
+the Archon tracker gets a `todo` task instead of an issue, and
+[project intake](#project-intake), which files the backlog it plans from the project's
+specifications.
 
 ## Public writes belong to a script
 
@@ -933,6 +941,61 @@ back:
   "schedule": { "intervalSeconds": 14400, "runAtLoad": false }
 }
 ```
+
+## Project intake
+
+[`archon-project-intake`](project-intake/archon-project-intake.yaml) turns the
+specifications an operator uploaded to an Archon project's Docs into `todo` tasks in
+that project. The document never passes through the command line or the checkout:
+
+1. Upload the specification in the project's Docs tab and give it the type `spec`.
+2. Declare the project in the repository's `.factory/project.yaml` with
+   `tracker.primary: archon` (see [Archon task tracker](#archon-task-tracker)), and set
+   `ARCHON_TRACKER_BASE_URL` where Archon runs.
+3. Run it against the checkout, with no message:
+   `archon workflow run archon-project-intake --cwd <checkout> --no-worktree`. Add
+   `--workflow-source <archon checkout>` to run the pack from a checkout of Archon
+   rather than the installed one.
+4. Answer the approval it pauses on: `approve` creates the tasks, `reject` ends the
+   run cancelled with nothing written.
+
+- **Sources.** `sources` refuses, before any request, a checkout with no project file,
+  one whose project keeps its work on GitHub, one with no git remote pointing at the
+  file's `github_repo`, and an unset or refused base URL; there is no GitHub path. It
+  reads every document in the project and keeps those typed `spec`, several included.
+  A project with no documents, none typed `spec`, or a `spec` holding fewer than 25
+  words outside its headings (a document the Docs tab just created holds its title and
+  a placeholder line) stops the run with what to do; nothing is read from the
+  repository instead. `intake/sources.json` holds each specification's content, the
+  tracker's metadata, and a SHA-256 of its id, title, type and content; its
+  `fingerprint` covers the project and every specification. `intake/tasks.json` lists
+  the tasks an earlier intake created there, archived ones included.
+- **Plan.** One large-model agent, which can only read, analyses the specifications into
+  an objective, scope, the assumptions and constraints they state, lots, and tasks with
+  a key, lot, priority, dependencies, acceptance criteria and the source locations they
+  rest on, plus open questions and risks. It reuses the key of a task in `tasks.json`
+  that covers the same work. Specifications too thin to plan from end the run at
+  `proposal` with the agent's reason.
+- **Approval.** `proposal` refuses a plan that does not hold together: an unknown or
+  cyclic dependency, a task with no acceptance criterion or source, a citation of a
+  document that was not analysed, or text holding `<!-- archon-` tracker metadata. A
+  ready plan is written to `intake/plan.json` with the project, tracker, repository and
+  fingerprint it was made from, and the run pauses on one approval: the documents
+  analysed, the lots and how many tasks would be created or are already there, the
+  assumptions, and the blocking open questions.
+- **Writes.** After approval, `create` refuses before any write when the checkout or
+  environment now names another project, tracker or repository, or the project's
+  specifications were added, removed or edited since they were analysed: run the
+  intake again to plan from what is there now. It then creates each task, dependencies
+  first, as `todo` in the project, read back as sent. A task's description starts with
+  `<!-- archon-project-intake <key> -->`, then the task's description, lot, priority,
+  dependencies, acceptance criteria and sources. The lot is written there rather than
+  in the tracker's `feature` field, which the tracker client does not send.
+- **Running again.** A task carrying a planned key's marker, archived or not, is
+  recovered and left as it is, so a `create` resumed after a failure partway creates
+  only what is missing, and a later intake creates only tasks under new keys. Two tasks
+  carrying one key, or intake metadata anywhere but a description's first line, refuses
+  the run before any write.
 
 ## Worktree cleanup
 
