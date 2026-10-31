@@ -15,6 +15,7 @@ export type Schema =
   | { readonly type: 'string'; readonly pattern?: string; readonly enum?: readonly string[] }
   | NullableString
   | { readonly type: 'boolean' }
+  | { readonly type: 'integer' }
   | { readonly type: 'array'; readonly items: Schema; readonly minItems?: number }
   | ObjectSchema<Readonly<Record<string, Schema>>>
   /** Any object: a record whose fields belong to someone else, such as a tracker's metadata. */
@@ -40,13 +41,15 @@ export type Infer<S> = S extends { readonly type: 'string'; readonly enum: reado
       ? string | null
       : S extends { readonly type: 'boolean' }
         ? boolean
-        : S extends { readonly type: 'array'; readonly items: infer I }
-          ? readonly Infer<I>[]
-          : S extends ObjectSchema<infer P>
-            ? { readonly [K in keyof P]: Infer<P[K]> }
-            : S extends { readonly type: 'object' }
-              ? Readonly<Record<string, unknown>>
-              : never;
+        : S extends { readonly type: 'integer' }
+          ? number
+          : S extends { readonly type: 'array'; readonly items: infer I }
+            ? readonly Infer<I>[]
+            : S extends ObjectSchema<infer P>
+              ? { readonly [K in keyof P]: Infer<P[K]> }
+              : S extends { readonly type: 'object' }
+                ? Readonly<Record<string, unknown>>
+                : never;
 
 /** A closed object schema requiring every property it declares. */
 export function object<const P extends Readonly<Record<string, Schema>>>(properties: P): ObjectSchema<P> {
@@ -79,6 +82,9 @@ function check(schema: Schema, value: unknown, at: string, problems: string[]): 
       return checkString(schema, value, at, problems);
     case 'boolean':
       if (typeof value !== 'boolean') problems.push(`${at} is not true or false`);
+      return;
+    case 'integer':
+      if (!Number.isInteger(value)) problems.push(`${at} is not an integer`);
       return;
     case 'array':
       return checkArray(schema, value, at, problems);

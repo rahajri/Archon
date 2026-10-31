@@ -15,11 +15,13 @@ import { artifactsDir, emit, refuse } from '../../.shared/io.ts';
 import {
   assertSameSources,
   assertSameTarget,
+  CREATE_OUTPUT,
   createPlannedTasks,
   intakeTarget,
   parsePlanFile,
   readIntakeSources,
 } from '../../.shared/project-intake.ts';
+import type { Infer } from '../../.shared/schema.ts';
 
 try {
   const file = parsePlanFile(JSON.parse(readFileSync(join(artifactsDir(), 'intake', 'plan.json'), 'utf8')));
@@ -31,7 +33,7 @@ try {
     summary: `Created ${String(created.length)} todo tasks in Archon project ${file.project_id}; ${String(recovered.length)} were already there from an earlier intake.`,
     created,
     recovered,
-  });
+  } satisfies Infer<typeof CREATE_OUTPUT>);
 } catch (error) {
   refuse(`project intake create: ${error instanceof Error ? error.message : String(error)}`);
 }

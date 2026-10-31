@@ -18,7 +18,9 @@ import {
   parseIntakeTaskSummaries,
   parsePlan,
   planFile,
+  PROPOSAL_OUTPUT,
 } from '../../.shared/project-intake.ts';
+import type { Infer } from '../../.shared/schema.ts';
 
 try {
   const intake = join(artifactsDir(), 'intake');
@@ -35,7 +37,7 @@ try {
     question: approvalQuestion(file, new Set(existing.map(task => task.key)), path),
     lots: plan.lots.length,
     tasks: plan.tasks.length,
-  });
+  } satisfies Infer<typeof PROPOSAL_OUTPUT>);
 } catch (error) {
   refuse(`project intake proposal: ${error instanceof Error ? error.message : String(error)}`);
 }

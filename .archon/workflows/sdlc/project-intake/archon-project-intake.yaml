@@ -30,8 +30,11 @@ nodes:
   - id: sources
     script: sources
     runtime: bun
+    # SOURCES_OUTPUT in .shared/project-intake.ts, the type the script emits; a test
+    # holds the two equal.
     output_format:
       type: object
+      additionalProperties: false
       properties:
         project_id: { type: string }
         documents: { type: integer }
@@ -135,8 +138,10 @@ nodes:
     depends_on: [sources, plan]
     with:
       plan: { from: "$plan.output" }
+    # PROPOSAL_OUTPUT in .shared/project-intake.ts; a test holds the two equal.
     output_format:
       type: object
+      additionalProperties: false
       properties:
         question: { type: string }
         lots: { type: integer }
@@ -161,14 +166,17 @@ nodes:
     runtime: bun
     depends_on: [approve]
     when: "$approve.output.decision == 'approve'"
+    # CREATE_OUTPUT in .shared/project-intake.ts; a test holds the two equal.
     output_format:
       type: object
+      additionalProperties: false
       properties:
         summary: { type: string }
         created: &written
           type: array
           items:
             type: object
+            additionalProperties: false
             properties:
               key: { type: string }
               url: { type: string }

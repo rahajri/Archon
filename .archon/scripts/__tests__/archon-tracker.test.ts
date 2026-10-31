@@ -318,7 +318,7 @@ describe('ArchonTracker', () => {
   ])('refuses a created task the tracker %s, naming the field and the task', async (_case, changes, field) => {
     const { tracker } = trackerWith(json({ task: task('t1') }), json(stored(changes)));
     await expect(tracker.createTask(newTask)).rejects.toThrow(
-      `the tracker created task t1 but reads back a different ${field} than was sent, so it is not reported as filed. Check it before running again: a later pass recovers it as filed if the marker on its description's first line is intact and it is in project ${PROJECT_ID}.`
+      `the tracker created task t1 but reads back a different ${field} than was sent, so it is not reported as filed. The tracker stored task t1. Before running again, look in project ${PROJECT_ID} for a task whose description's first line carries its marker: a later pass recovers that task as filed, but files the task again when the marker is missing or damaged.`
     );
   });
 
@@ -338,17 +338,32 @@ describe('ArchonTracker', () => {
     await expect(listing.createTask(newTask)).rejects.toThrow('the tracker reads back task t1 as something that is not a task');
   });
 
-  test.each([
-    [422, '{"detail":[{"msg":"Field required"}]}'],
-    [404, '{"detail":"Project not found"}'],
-    [500, 'Internal Server Error'],
-  ])('reports a %i response with its status and body, as a refusal', async (status, body) => {
-    const { tracker } = trackerWith(new Response(body, { status }));
+  test('reports a request validation error, which the tracker sends before its handler stores anything, as a refusal', async () => {
+    const body = '{"detail":[{"type":"missing","loc":["body","title"],"msg":"Field required"}]}';
+    const { tracker } = trackerWith(new Response(body, { status: 422 }));
     const error = await tracker.createTask(newTask).catch((caught: unknown) => caught);
     expect(error).toBeInstanceOf(ArchonTrackerError);
     expect(error).not.toBeInstanceOf(UnconfirmedTaskError);
-    expect((error as ArchonTrackerError).status).toBe(status);
-    expect((error as ArchonTrackerError).message).toContain(body);
+    expect((error as ArchonTrackerError).status).toBe(422);
+    expect((error as ArchonTrackerError).message).toBe(`POST /api/tasks failed with 422: ${body}`);
+  });
+
+  test.each([
+    // The handler stores the task, then answers a later failure with 400 or 500.
+    [400, '{"detail":{"error":"Error creating task: KeyError"}}'],
+    [500, '{"detail":{"error":"connection reset"}}'],
+    [404, '{"detail":"Not Found"}'],
+    // A proxy in front of the tracker cannot say whether the request reached it.
+    [502, '<html>Bad Gateway</html>'],
+    [503, 'Service Unavailable'],
+    [504, '<html>Gateway Timeout</html>'],
+  ])('a create answered %i may have stored a task, so it is unconfirmed, with the status and body', async (status, body) => {
+    const { tracker } = trackerWith(new Response(body, { status }));
+    const error = await tracker.createTask(newTask).catch((caught: unknown) => caught);
+    expect(error).toBeInstanceOf(UnconfirmedTaskError);
+    expect((error as UnconfirmedTaskError).taskId).toBeNull();
+    expect((error as Error).message).toStartWith(`POST /api/tasks failed with ${String(status)}: ${body} The tracker may have stored the task.`);
+    expect((error as Error).cause).toMatchObject({ status });
   });
 
   test.each([
@@ -363,7 +378,7 @@ describe('ArchonTracker', () => {
     expect(error).toBeInstanceOf(UnconfirmedTaskError);
     expect((error as UnconfirmedTaskError).taskId).toBeNull();
     expect((error as Error).message).toStartWith(why);
-    expect((error as Error).message).toContain(`The tracker may have stored the task: look for it in project ${PROJECT_ID} before running again`);
+    expect((error as Error).message).toContain(`The tracker may have stored the task. Before running again, look in project ${PROJECT_ID} for a task whose description's first line carries its marker`);
   });
 
   test('reports an unreachable tracker by its origin', async () => {

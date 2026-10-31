@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, test } from 'bun:test';
 import { spawnSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { trackTempRoots } from './temp-roots';
@@ -9,6 +9,7 @@ import { ArchonTrackerError, UnconfirmedTaskError } from '../../workflows/sdlc/.
 import {
   assertSameSources,
   assertSameTarget,
+  CREATE_OUTPUT,
   createPlannedTasks,
   intakeMarker,
   intakeTarget,
@@ -21,9 +22,12 @@ import {
   parsePlanFile,
   PLAN_SCHEMA,
   planFile,
+  PROPOSAL_OUTPUT,
   readIntakeSources,
+  SOURCES_OUTPUT,
 } from '../../workflows/sdlc/.shared/project-intake';
 import { ProjectContextError } from '../../workflows/sdlc/.shared/project-context';
+import { conforms, type Schema } from '../../workflows/sdlc/.shared/schema';
 
 const track = trackTempRoots();
 
@@ -99,8 +103,8 @@ interface Tracker {
   docs: Doc[];
   tasks: Task[];
   requests: { method: string; path: string; body: unknown }[];
-  /** Fail every task creation after this many succeeded. */
-  failCreatesAfter?: number;
+  /** Answer every task creation after `after` succeeded with `status`, having stored the task first when `stored`. */
+  failCreates?: { after: number; status: number; stored: boolean };
   /** Store a created task and answer its creation, but fail reading it back. */
   failReadBack?: boolean;
   /** How the tracker stores a created task; it answers the creation with the task as sent. */
@@ -149,9 +153,11 @@ const ROUTES: Record<string, Route[]> = {
     (state, url, body) => {
       if (url.pathname !== '/api/tasks') return undefined;
       const earlier = state.requests.filter(entry => entry.method === 'POST').length - 1;
-      if (state.failCreatesAfter !== undefined && earlier >= state.failCreatesAfter) return new Response('Internal Server Error', { status: 500 });
+      const failing = state.failCreates !== undefined && earlier >= state.failCreates.after ? state.failCreates : undefined;
+      if (failing !== undefined && !failing.stored) return new Response(`failed with ${String(failing.status)}`, { status: failing.status });
       const task = { id: `task-${String(state.tasks.length + 1)}`, archived: false, description: null, ...body } as Task;
       state.tasks.push(state.stores?.({ ...task }) ?? task);
+      if (failing !== undefined) return new Response(`failed with ${String(failing.status)} after storing`, { status: failing.status });
       return Response.json({ message: 'Task created successfully', task });
     },
   ],
@@ -171,6 +177,9 @@ async function handle(state: Tracker, request: Request): Promise<Response> {
 function fetchOf(state: Tracker): typeof fetch {
   return (async (input: RequestInfo | URL, init?: RequestInit) => handle(state, new Request(String(input), init))) as typeof fetch;
 }
+
+/** `intake/plan.json` as a test edits it. */
+type PlanJson = { plan: { tasks: Record<string, unknown>[] } };
 
 const ref = (document_id = 'doc-1') => ({ document_id, location: 'Réception matière' });
 
@@ -213,6 +222,14 @@ async function refusal(pending: Promise<unknown>): Promise<Error> {
     return error as Error;
   }
   throw new Error('it was not refused');
+}
+
+/** The `output_format` the workflow declares for node `id`. */
+function outputFormat(id: string): unknown {
+  const workflow = Bun.YAML.parse(readFileSync(join(PACK, 'project-intake/archon-project-intake.yaml'), 'utf8')) as {
+    nodes: { id: string; output_format?: unknown }[];
+  };
+  return workflow.nodes.find(node => node.id === id)?.output_format;
 }
 
 async function sourcesOf(state: Tracker, root = checkout()): Promise<IntakeSources> {
@@ -414,10 +431,7 @@ describe('the plan', () => {
   });
 
   test("the plan node's output_format is the schema the plan is checked against", () => {
-    const workflow = Bun.YAML.parse(readFileSync(join(PACK, 'project-intake/archon-project-intake.yaml'), 'utf8')) as {
-      nodes: { id: string; output_format?: unknown }[];
-    };
-    expect(workflow.nodes.find(node => node.id === 'plan')?.output_format).toEqual(JSON.parse(JSON.stringify(PLAN_SCHEMA)));
+    expect(outputFormat('plan')).toEqual(JSON.parse(JSON.stringify(PLAN_SCHEMA)));
   });
 });
 
@@ -567,25 +581,76 @@ describe('creating the approved plan', () => {
 
   const keys = (written: { key: string }[]) => written.map(entry => entry.key);
 
-  test('a creation the tracker refuses names what this run created, and running again creates only the rest', async () => {
+  test('a creation the tracker refuses before storing anything names what this run created, and running again creates only the rest', async () => {
     const state = tracker();
     const { target, file } = await approved(state);
-    state.failCreatesAfter = 0;
+    state.failCreates = { after: 0, status: 422, stored: false };
     const first = await refusal(createPlannedTasks(target.tracker, file));
     expect(first.message).toBe(
-      "the tracker refused to create lot-reception-check: POST /api/tasks failed with 500: Internal Server Error This run created no task before it. Running the create step again recovers what this run created and creates the rest."
+      'the tracker refused to create lot-reception-check: POST /api/tasks failed with 422: failed with 422 lot-reception-check was the first task this run tried to create. Running the create step again recovers what this run created and creates the rest.'
     );
+    expect(first.cause).not.toBeInstanceOf(UnconfirmedTaskError);
     expect(state.tasks).toEqual([]);
 
     state.requests.length = 0;
-    state.failCreatesAfter = 1;
+    state.failCreates = { after: 1, status: 422, stored: false };
     await expect(createPlannedTasks(target.tracker, file)).rejects.toThrow(
-      'the tracker refused to create part-lot-link: POST /api/tasks failed with 500: Internal Server Error This run created lot-reception-check before it, each read back as sent. Running the create step again'
+      'the tracker refused to create part-lot-link: POST /api/tasks failed with 422: failed with 422 Before part-lot-link, this run created lot-reception-check, each read back as sent. Running the create step again'
     );
-    state.failCreatesAfter = undefined;
+    state.failCreates = undefined;
     const again = await createPlannedTasks(target.tracker, file);
     expect([keys(again.recovered), keys(again.created)]).toEqual([['lot-reception-check'], ['part-lot-link']]);
     expect(state.tasks.map(task => task.title)).toEqual(['Build lot-reception-check', 'Build part-lot-link']);
+  });
+
+  /** What an unconfirmed create must and must not say: it never claims the tracker holds nothing, nor asks for a blind rerun. */
+  function expectUnconfirmed(error: Error, key: string): void {
+    expect(error.cause).toBeInstanceOf(UnconfirmedTaskError);
+    expect(error.message).toStartWith(`creating ${key} was not confirmed: `);
+    expect(error.message).toContain(`Before running again, look in project ${PROJECT_ID} for a task whose description's first line carries its marker`);
+    expect(error.message).toContain(`Its marker is ${intakeMarker(key)}.`);
+    for (const claim of ['refused', 'nothing was written', 'no task was', 'holds no', 'created no task', 'Running the create step again recovers']) {
+      expect(error.message).not.toContain(claim);
+    }
+  }
+
+  test.each([
+    ['answered 400 after storing it', { status: 400, stored: true }],
+    ['answered 500 after storing it', { status: 500, stored: true }],
+    ['answered 500', { status: 500, stored: false }],
+    ['answered 502 from a gateway', { status: 502, stored: false }],
+    ['answered 504 from a gateway', { status: 504, stored: false }],
+  ])('a create the tracker %s is unconfirmed, names its marker, and a rerun recovers the task by that marker if it was stored', async (_case, failing) => {
+    const state = tracker();
+    const { target, file } = await approved(state);
+    state.failCreates = { after: 1, ...failing };
+    const error = await refusal(createPlannedTasks(target.tracker, file));
+    expectUnconfirmed(error, 'part-lot-link');
+    expect(error.message).toContain(`POST /api/tasks failed with ${String(failing.status)}`);
+    expect(error.message).toContain('The tracker may have stored the task.');
+    expect(error.message).toEndWith('Before part-lot-link, this run created lot-reception-check, each read back as sent.');
+    expect(state.tasks).toHaveLength(failing.stored ? 2 : 1);
+
+    state.failCreates = undefined;
+    state.requests.length = 0;
+    const again = await createPlannedTasks(target.tracker, file);
+    expect(keys(again.recovered)).toEqual(failing.stored ? ['lot-reception-check', 'part-lot-link'] : ['lot-reception-check']);
+    expect(keys(again.created)).toEqual(failing.stored ? [] : ['part-lot-link']);
+    expect(state.tasks).toHaveLength(2);
+  });
+
+  test('a create that gets no answer is unconfirmed and names its marker', async () => {
+    const state = tracker();
+    const root = checkout();
+    const answering = fetchOf(state);
+    const { file } = await approved(state);
+    const dropping = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      if (init?.method === 'POST') throw new TypeError('socket hang up');
+      return answering(input, init);
+    }) as typeof fetch;
+    const error = await refusal(createPlannedTasks(intakeTarget(root, BASE, dropping).tracker, file));
+    expectUnconfirmed(error, 'lot-reception-check');
+    expect(error.message).toContain(`POST /api/tasks: the tracker at ${BASE} is unreachable. The tracker may have stored the task.`);
   });
 
   test('a task stored but not read back is reported as unconfirmed, not as never created, and a rerun recovers it by its marker', async () => {
@@ -593,14 +658,12 @@ describe('creating the approved plan', () => {
     const { target, file } = await approved(state);
     state.failReadBack = true;
     const error = await refusal(createPlannedTasks(target.tracker, file));
-    expect(error.cause).toBeInstanceOf(UnconfirmedTaskError);
+    expectUnconfirmed(error, 'lot-reception-check');
     expect((error.cause as UnconfirmedTaskError).taskId).toBe('task-1');
     expect(error.message).toStartWith(
-      'creating lot-reception-check was not confirmed: the tracker created task task-1 but did not read it back: GET /api/tasks/task-1 failed with 500: Internal Server Error Check it before running again'
+      'creating lot-reception-check was not confirmed: the tracker created task task-1 but did not read it back: GET /api/tasks/task-1 failed with 500: Internal Server Error The tracker stored task task-1.'
     );
-    expect(error.message).toContain('Its marker is <!-- archon-project-intake lot-reception-check -->. This run created no task before it.');
-    expect(error.message).not.toContain('refused');
-    expect(error.message).not.toContain('Running the create step again recovers');
+    expect(error.message).toEndWith('lot-reception-check was the first task this run tried to create.');
 
     state.failReadBack = false;
     const again = await createPlannedTasks(target.tracker, file);
@@ -616,10 +679,11 @@ describe('creating the approved plan', () => {
     const { target, file } = await approved(state);
     state.stores = stores;
     const error = await refusal(createPlannedTasks(target.tracker, file));
+    expectUnconfirmed(error, 'lot-reception-check');
+    expect((error.cause as UnconfirmedTaskError).taskId).toBe('task-1');
     expect(error.message).toStartWith(
-      'creating lot-reception-check was not confirmed: the tracker created task task-1 but reads back a different description than was sent, so it is not reported as filed. Check it before running again'
+      'creating lot-reception-check was not confirmed: the tracker created task task-1 but reads back a different description than was sent, so it is not reported as filed. The tracker stored task task-1.'
     );
-    expect(error.message).not.toContain('Running the create step again recovers');
 
     state.stores = undefined;
     const again = await createPlannedTasks(target.tracker, file);
@@ -701,7 +765,22 @@ async function runScript(name: string, cwd: string, artifacts: string, base: str
   return { code, stdout, stderr };
 }
 
+/** How a script's stdout departs from the `output_format` its node declares, as the engine checks it. */
+function outputProblems(id: string, stdout: string): string[] {
+  const problems: string[] = [];
+  conforms(outputFormat(id) as Schema, JSON.parse(stdout) as unknown, id, problems);
+  return problems;
+}
+
 describe('the workflow scripts', () => {
+  test.each([
+    ['sources', SOURCES_OUTPUT],
+    ['proposal', PROPOSAL_OUTPUT],
+    ['create', CREATE_OUTPUT],
+  ])("the %s node's output_format is the schema its script emits", (id, schema) => {
+    expect(outputFormat(id)).toEqual(JSON.parse(JSON.stringify(schema)));
+  });
+
   test('read, propose, and after approval create, writing only run artifacts and tracker tasks', async () => {
     const state = tracker();
     const server = Bun.serve({ port: 0, hostname: '127.0.0.1', fetch: request => handle(state, request) });
@@ -713,10 +792,13 @@ describe('the workflow scripts', () => {
 
       const sources = await runScript('sources', root, artifacts, base);
       expect(sources).toMatchObject({ code: 0, stderr: '' });
+      expect(outputProblems('sources', sources.stdout)).toEqual([]);
       expect(JSON.parse(sources.stdout)).toMatchObject({ project_id: PROJECT_ID, documents: 1 });
 
       const proposal = await runScript('proposal', root, artifacts, base, { INPUTS_PLAN: JSON.stringify(plan()) });
       expect(proposal).toMatchObject({ code: 0, stderr: '' });
+      expect(outputProblems('proposal', proposal.stdout)).toEqual([]);
+      expect(JSON.parse(proposal.stdout)).toMatchObject({ lots: 2, tasks: 2 });
       const question = (JSON.parse(proposal.stdout) as { question: string }).question;
       expect(question).toContain('Project intake proposes 2 tasks in 2 lots');
       expect(question).toContain('2 to create as todo, 0 already there');
@@ -725,8 +807,10 @@ describe('the workflow scripts', () => {
 
       const create = await runScript('create', root, artifacts, base);
       expect(create).toMatchObject({ code: 0, stderr: '' });
+      expect(outputProblems('create', create.stdout)).toEqual([]);
       expect(JSON.parse(create.stdout)).toMatchObject({ created: [{ key: 'lot-reception-check' }, { key: 'part-lot-link' }], recovered: [] });
       const rerun = await runScript('create', root, artifacts, base);
+      expect(outputProblems('create', rerun.stdout)).toEqual([]);
       expect(JSON.parse(rerun.stdout)).toMatchObject({ created: [], recovered: [{ key: 'lot-reception-check' }, { key: 'part-lot-link' }] });
       expect(state.tasks).toHaveLength(2);
 
@@ -821,6 +905,76 @@ describe('the workflow scripts', () => {
     const sources = await runScript('proposal', root, artifacts, base, { INPUTS_PLAN: JSON.stringify(plan()) });
     expect(sources.code).toBe(1);
     expect(sources.stderr).toContain('project intake proposal: intake/sources.json is not what this workflow wrote');
+  }, 60_000);
+
+  const intakeTask = (id: string, key: string, archived = false): Task => ({
+    id,
+    project_id: PROJECT_ID,
+    title: `Build ${key}`,
+    description: `${intakeMarker(key)}\nThe brief.`,
+    status: archived ? 'done' : 'todo',
+    archived,
+  });
+
+  test('the approval counts the planned tasks the project already holds, archived ones included, and nothing else', async () => {
+    const state = tracker(
+      [spec('doc-1')],
+      [
+        intakeTask('t1', 'lot-reception-check'),
+        intakeTask('t2', 'part-lot-link', true),
+        intakeTask('t3', 'retired-task'),
+        { ...intakeTask('t4', 'unused-key'), description: 'A task a person wrote about part-lot-link.' },
+        { ...intakeTask('t5', 'unused-key'), description: '<!-- archon-discovery cert-upload -->\nThe brief.' },
+      ]
+    );
+    const base = serve(state);
+    const root = checkout();
+    const artifacts = track(mkdtempSync(join(tmpdir(), 'project-intake-artifacts-')));
+    expect(await runScript('sources', root, artifacts, base)).toMatchObject({ code: 0, stderr: '' });
+    const planned = plan({ tasks: [plannedTask('lot-reception-check'), plannedTask('part-lot-link', ['lot-reception-check'], 'traceability'), plannedTask('cert-upload')] });
+    const proposal = await runScript('proposal', root, artifacts, base, { INPUTS_PLAN: JSON.stringify(planned) });
+    expect(proposal).toMatchObject({ code: 0, stderr: '' });
+    expect((JSON.parse(proposal.stdout) as { question: string }).question).toStartWith(
+      `Project intake proposes 3 tasks in 2 lots for Archon project ${PROJECT_ID}: 1 to create as todo, 2 already there from an earlier intake.`
+    );
+
+    const create = await runScript('create', root, artifacts, base);
+    expect(JSON.parse(create.stdout)).toMatchObject({ created: [{ key: 'cert-upload' }], recovered: [{ key: 'lot-reception-check' }, { key: 'part-lot-link' }] });
+  }, 60_000);
+
+  test('a damaged intake marker in the project stops the run before the operator is asked, rather than changing the count', async () => {
+    const state = tracker([spec('doc-1')], [intakeTask('t1', 'lot-reception-check'), { ...intakeTask('t2', 'unused-key'), description: '<!--archon-project-intake part-lot-link-->' }]);
+    const base = serve(state);
+    const root = checkout();
+    const artifacts = track(mkdtempSync(join(tmpdir(), 'project-intake-artifacts-')));
+    const sources = await runScript('sources', root, artifacts, base);
+    expect(sources.code).toBe(1);
+    expect(sources.stdout).toBe('');
+    expect(sources.stderr).toContain('task t2 carries archon-project-intake metadata that is not one canonical marker on its first line');
+    expect(existsSync(join(artifacts, 'intake/tasks.json'))).toBe(false);
+  }, 60_000);
+
+  test.each([
+    ['a malformed task key', (file: PlanJson) => Object.assign(file.plan.tasks[0] ?? {}, { key: 'Lot Reception' }), 'plan_file.plan.tasks[0].key does not match'],
+    ['a task without its source_refs', (file: PlanJson) => delete file.plan.tasks[0]?.source_refs, 'plan_file.plan.tasks[0].source_refs is missing'],
+    ['a dependency on an undeclared task', (file: PlanJson) => Object.assign(file.plan.tasks[1] ?? {}, { dependencies: ['nowhere'] }), 'task part-lot-link depends on nowhere, which the plan does not declare'],
+    ['a multi-line title', (file: PlanJson) => Object.assign(file.plan.tasks[0] ?? {}, { title: 'Build it\nand more' }), 'plan_file.plan.tasks[0].title does not match'],
+    ['a citation of a document not analysed', (file: PlanJson) => Object.assign(file.plan.tasks[0] ?? {}, { source_refs: [ref('doc-x')] }), 'cites doc-x, which is not an analysed source'],
+  ])('create refuses a plan.json edited after the proposal to hold %s, before any task is posted', async (_case, tamper, why) => {
+    const state = tracker();
+    const { base, root, artifacts } = await proposed(state);
+    const path = join(artifacts, 'intake/plan.json');
+    const file = JSON.parse(readFileSync(path, 'utf8')) as PlanJson;
+    tamper(file);
+    writeFileSync(path, JSON.stringify(file));
+
+    const create = await runScript('create', root, artifacts, base);
+    expect(create.code).toBe(1);
+    expect(create.stdout).toBe('');
+    expect(create.stderr).toContain('project intake create: intake/plan.json is not what this workflow wrote: ');
+    expect(create.stderr).toContain(why);
+    expect(posts(state)).toEqual([]);
+    expect(state.tasks).toEqual([]);
   }, 60_000);
 
   test('an insufficient plan stops before the operator is asked', async () => {

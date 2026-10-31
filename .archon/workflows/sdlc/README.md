@@ -186,11 +186,13 @@ as their `project_id`. A created task is read back, and one that differs in any 
 sent (its project, title, description or status) is refused rather than reported as
 filed. The refusal names the task: a later pass recovers it as filed if the marker on
 its description's first line survived and it is in the project, so check it before
-running again. A create the tracker answers with an error status is a plain refusal,
-since the tracker holds no such task; any other failure once the request is sent (no
-answer, an answer that is not a task, a read-back that fails) is reported as
-unconfirmed, with the task's id when the tracker returned one, because the task may be
-stored. A task list holding another project's task is refused too, since each
+running again. Only a create the tracker answers with 422, its request validation
+error, is a plain refusal: the tracker sends it before its handler runs, so no task was
+stored. Any other failure once the request is sent is reported as unconfirmed, with the
+task's id when the tracker returned one, because the task may be stored: a 400 or 500,
+which the tracker's handler can send after storing the task; a gateway's 502 or 504 or
+any other status a proxy sends; no answer; an answer that is not a task; a read-back
+that fails or differs from what was sent. A task list holding another project's task is refused too, since each
 workflow recovers its own filings from that list. It reaches the tracker at `ARCHON_TRACKER_BASE_URL`, set in the environment
 Archon runs with, for example `ARCHON_TRACKER_BASE_URL=http://127.0.0.1:8181` in
 `~/.archon/.env`. There is no default. A value with credentials (userinfo), a query or
@@ -1008,9 +1010,10 @@ its proposal, the operator's approval, and the tasks as `todo` in the project.
   specifications were added, removed or edited since they were analysed: run the
   intake again to plan from what is there now. So does a description that a document
   title would fill with reserved task metadata. It then creates each task, dependencies
-  first, as `todo` in the project, read back as sent. A task the tracker refuses stops
-  the run naming what this run created; one it may have stored without confirming stops
-  it naming the task's id when known and its marker, to check before running again. A task's description starts with
+  first, as `todo` in the project, read back as sent. A task the tracker refuses before
+  storing anything stops the run naming what this run created; one it may have stored
+  without confirming, any other failure, stops it naming the task's id when known and
+  its marker, to find in the project before running again. A task's description starts with
   `<!-- archon-project-intake <key> -->`, then the task's description, lot, priority,
   dependencies, acceptance criteria and sources. The lot is written there rather than
   in the tracker's `feature` field, which the tracker client does not send.

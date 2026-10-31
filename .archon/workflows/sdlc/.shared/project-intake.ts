@@ -82,11 +82,24 @@ export function intakeTarget(checkout: string, baseUrlValue: string | undefined,
 // schema here: its type is inferred from it, and its reader refuses anything else.
 
 const STRING = { type: 'string' } as const;
+const INTEGER = { type: 'integer' } as const;
 const REPO = object({ host: STRING, path: STRING });
 
 function refuseRunFile(name: string, problems: readonly string[]): never {
   throw new ProjectIntakeError(`intake/${name} is not what this workflow wrote: ${problems.join('; ')}`);
 }
+
+// --- what each script node outputs --------------------------------------------------------
+//
+// Each is the node's `output_format`, held equal to it by a test, and the type its script
+// emits, so the workflow and the script cannot disagree on a field.
+
+export const SOURCES_OUTPUT = object({ project_id: STRING, documents: INTEGER, fingerprint: STRING });
+export const PROPOSAL_OUTPUT = object({ question: STRING, lots: INTEGER, tasks: INTEGER });
+const WRITTEN = { type: 'array', items: object({ key: STRING, url: STRING }) } as const;
+export const CREATE_OUTPUT = object({ summary: STRING, created: WRITTEN, recovered: WRITTEN });
+
+export type WrittenTask = Infer<typeof WRITTEN>[number];
 
 // --- the sources ------------------------------------------------------------------------
 
@@ -534,10 +547,6 @@ export function intakeTaskDescription(task: PlannedTask, file: IntakePlanFile): 
   return `${intakeMarker(task.key)}\n${body}`;
 }
 
-export interface WrittenTask {
-  readonly key: string;
-  readonly url: string;
-}
 
 /**
  * Create each planned task the project does not already hold, dependencies first. A task
@@ -570,15 +579,16 @@ export async function createPlannedTasks(
 }
 
 /**
- * Why creating `key` stopped the run, and what a rerun does. Only a task the tracker
- * refused is known not to exist; one it may have stored, unconfirmed, is left for the
- * operator to check, since a rerun recovers it only if its marker survived.
+ * Why creating `key` stopped the run, and what a rerun does. Only a create the tracker
+ * refused before its handler ran is known not to have stored a task; any other failure
+ * may have, so the task is named with its marker for the operator to find before running
+ * again, since a rerun recovers it only if that marker survived.
  */
 function creationFailure(key: string, created: readonly WrittenTask[], error: unknown): ProjectIntakeError {
   const earlier =
     created.length === 0
-      ? 'This run created no task before it.'
-      : `This run created ${created.map(entry => entry.key).join(', ')} before it, each read back as sent.`;
+      ? `${key} was the first task this run tried to create.`
+      : `Before ${key}, this run created ${created.map(entry => entry.key).join(', ')}, each read back as sent.`;
   const message = error instanceof Error ? error.message : String(error);
   if (error instanceof UnconfirmedTaskError) {
     return new ProjectIntakeError(`creating ${key} was not confirmed: ${message} Its marker is ${intakeMarker(key)}. ${earlier}`, { cause: error });

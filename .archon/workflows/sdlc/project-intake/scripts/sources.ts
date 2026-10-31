@@ -12,7 +12,8 @@
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { emit, artifactsDir, refuse } from '../../.shared/io.ts';
-import { intakeTarget, intakeTaskSummaries, intakeTasks, readIntakeSources } from '../../.shared/project-intake.ts';
+import { intakeTarget, intakeTaskSummaries, intakeTasks, readIntakeSources, SOURCES_OUTPUT } from '../../.shared/project-intake.ts';
+import type { Infer } from '../../.shared/schema.ts';
 
 try {
   const target = intakeTarget(process.cwd(), process.env.ARCHON_TRACKER_BASE_URL);
@@ -22,7 +23,7 @@ try {
   mkdirSync(intake, { recursive: true });
   writeFileSync(join(intake, 'sources.json'), `${JSON.stringify(sources, null, 2)}\n`);
   writeFileSync(join(intake, 'tasks.json'), `${JSON.stringify(existing, null, 2)}\n`);
-  emit({ project_id: sources.project.id, documents: sources.documents.length, fingerprint: sources.fingerprint });
+  emit({ project_id: sources.project.id, documents: sources.documents.length, fingerprint: sources.fingerprint } satisfies Infer<typeof SOURCES_OUTPUT>);
 } catch (error) {
   refuse(`project intake sources: ${error instanceof Error ? error.message : String(error)}`);
 }

@@ -47,8 +47,9 @@ export class ArchonTrackerError extends Error {
 
 /**
  * A task creation the tracker may have stored but that is not confirmed as sent: the
- * request got no answer or one that could not be read, or the task did not read back as
- * it was sent. `taskId` is the stored task's id when the tracker returned one.
+ * request got no answer, an error the tracker may send after storing the task, or one
+ * that could not be read, or the task did not read back as it was sent. `taskId` is the
+ * stored task's id when the tracker returned one.
  */
 export class UnconfirmedTaskError extends ArchonTrackerError {
   constructor(
@@ -125,6 +126,14 @@ export function declaredArchonTracker(
   return new ArchonTracker(context, trackerBaseUrl(baseUrlValue), fetchImpl);
 }
 
+/**
+ * The one create answer that proves nothing was stored: the tracker (FastAPI) validates a
+ * request against `CreateTaskRequest` before its handler runs. The handler answers a
+ * failure with 400 or 500, but it inserts the task before it can fail, so either may
+ * follow a stored task, as may any status a proxy in between sends.
+ */
+const REQUEST_INVALID = 422;
+
 export class ArchonTracker {
   constructor(
     readonly context: ArchonProjectContext,
@@ -136,10 +145,11 @@ export class ArchonTracker {
   /**
    * Create a task in the project and return its id, once the tracker reads back every
    * field of the request as it was sent. A refusal is an `ArchonTrackerError` only when
-   * the tracker answered the create with an error status, so it holds no such task;
-   * every other failure is an `UnconfirmedTaskError`, since the task may be stored. What
-   * a later pass makes of one depends on what survived: each workflow that files here
-   * recovers a task by the marker on its description's first line, in this project.
+   * the tracker answered the create with a request validation error, which it sends
+   * before its handler runs, so no task was stored; every other failure is an
+   * `UnconfirmedTaskError`, since the task may be stored. What a later pass makes of one
+   * depends on what survived: each workflow that files here recovers a task by the
+   * marker on its description's first line, in this project.
    */
   async createTask(task: NewArchonTask): Promise<string> {
     const sent = { ...task, project_id: this.context.archonProjectId };
@@ -147,7 +157,7 @@ export class ArchonTracker {
     try {
       body = await this.request('POST', this.url('api/tasks'), sent);
     } catch (error) {
-      if (error instanceof ArchonTrackerError && error.status !== null && (error.status < 200 || error.status > 299)) throw error;
+      if (error instanceof ArchonTrackerError && error.status === REQUEST_INVALID) throw error;
       throw this.unconfirmed(null, error instanceof Error ? error.message : String(error), error);
     }
     const created = isObject(body) ? body.task : undefined;
@@ -173,11 +183,12 @@ export class ArchonTracker {
 
   private unconfirmed(taskId: string | null, what: string, cause?: unknown): UnconfirmedTaskError {
     const project = this.context.archonProjectId;
-    const check =
-      taskId === null
-        ? `The tracker may have stored the task: look for it in project ${project} before running again, since a later pass recovers it as filed only if the marker on its description's first line is intact.`
-        : `Check it before running again: a later pass recovers it as filed if the marker on its description's first line is intact and it is in project ${project}.`;
-    return new UnconfirmedTaskError(`${what} ${check}`, taskId, cause === undefined ? undefined : { cause });
+    const task = taskId === null ? 'The tracker may have stored the task.' : `The tracker stored task ${taskId}.`;
+    return new UnconfirmedTaskError(
+      `${what} ${task} Before running again, look in project ${project} for a task whose description's first line carries its marker: a later pass recovers that task as filed, but files the task again when the marker is missing or damaged.`,
+      taskId,
+      cause === undefined ? undefined : { cause }
+    );
   }
 
   /**
