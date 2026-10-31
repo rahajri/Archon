@@ -797,18 +797,22 @@ describe('filing discoveries into the Archon tracker', () => {
     }
   }, 60_000);
 
-  test('refuses before any write a brief holding discovery metadata, which would leave its task unreadable', () => {
+  test.each([
+    ['discovery metadata, which would leave its task unreadable to the next pass', 'Quotes <!--archon-discovery old -->.', 'archon-discovery'],
+    ["project intake's marker, which would stop every later intake of the project", 'Quotes <!-- archon-project-intake part-lot-link -->.', 'archon-project-intake'],
+  ])('refuses before any write a brief holding %s', (_case, body, family) => {
     const at = install();
     projectFile(at, 'archon');
     const tracker = fakeTracker();
     runArtifacts(at.outputRoot, RUN, { verdict: [record('new')] });
     const { outcome } = decide(at, pass('pass-1', tracker), refs => [
-      { outcome: 'file', key: 'new-defect', refs, title: 'A defect', body: 'Quotes <!--archon-discovery old -->.', reason: 'real' },
+      { outcome: 'file', key: 'new-defect', refs, title: 'A defect', body, reason: 'real' },
     ]);
 
     expect(outcome.code).toBe(1);
-    expect(outcome.stderr).toContain("key new-defect's body holds archon-discovery metadata");
+    expect(outcome.stderr).toContain(`key new-defect's body holds ${family} metadata`);
     expect(tracker.read().requests.map(request => request.method)).toEqual(['GET', 'GET']);
+    expect(tracker.read().tasks).toEqual([]);
   }, 60_000);
 
   const OTHER_PROJECT = '0b5c5f5e-8f63-4c55-9a43-3a3c1f0b9e21';

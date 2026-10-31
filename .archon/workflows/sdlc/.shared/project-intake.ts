@@ -12,12 +12,13 @@
  */
 
 import { createHash } from 'node:crypto';
-import { type ArchonDocument, type ArchonProject, ArchonProjectDocs } from './archon-docs.ts';
-import { type ArchonTask, ArchonTracker, trackerBaseUrl } from './archon-tracker.ts';
-import { mentionsDiscoveryMetadata } from './discoveries.ts';
+import { type ArchonDocument, ArchonProjectDocs } from './archon-docs.ts';
+import { type ArchonTask, ArchonTracker, trackerBaseUrl, UnconfirmedTaskError } from './archon-tracker.ts';
 import { type QualifiedPr, sameRepo } from './forge.ts';
 import { PROJECT_FILE, readProjectContext } from './project-context.ts';
 import { findRemote } from './remote.ts';
+import { conforms, type Infer, object } from './schema.ts';
+import { opensTaskMetadata, taskMetadataIn } from './task-metadata.ts';
 import { isObject } from './typed.ts';
 
 type Repo = QualifiedPr['repo'];
@@ -75,29 +76,51 @@ export function intakeTarget(checkout: string, baseUrlValue: string | undefined,
   };
 }
 
-// --- the sources ------------------------------------------------------------------------
+// --- the run's files --------------------------------------------------------------------
+//
+// Each node hands the next its result as a file in the run's artifacts. Every file has one
+// schema here: its type is inferred from it, and its reader refuses anything else.
 
-/** A specification as intake analyses it: the document, its markdown, and their fingerprint. */
-export interface IntakeSource {
-  readonly id: string;
-  readonly title: string;
-  readonly document_type: string;
-  readonly metadata: Readonly<Record<string, unknown>>;
-  /** SHA-256 of the id, title, type and content, so any change to what was analysed changes it. */
-  readonly sha256: string;
-  readonly content: string;
+const STRING = { type: 'string' } as const;
+const REPO = object({ host: STRING, path: STRING });
+
+function refuseRunFile(name: string, problems: readonly string[]): never {
+  throw new ProjectIntakeError(`intake/${name} is not what this workflow wrote: ${problems.join('; ')}`);
 }
 
+// --- the sources ------------------------------------------------------------------------
+
 /** `intake/sources.json`: what one intake run analyses, and where it came from. */
-export interface IntakeSources {
-  readonly project: ArchonProject;
-  readonly repo: Repo;
-  readonly tracker_base_url: string;
+const SOURCES_SCHEMA = object({
+  project: object({ id: STRING, title: STRING }),
+  repo: REPO,
+  tracker_base_url: STRING,
   /** SHA-256 over the project id and every source's fingerprint. */
-  readonly fingerprint: string;
-  readonly documents: readonly IntakeSource[];
+  fingerprint: STRING,
+  /** Each specification as intake analyses it: the document, its markdown, and their fingerprint. */
+  documents: {
+    type: 'array',
+    items: object({
+      id: STRING,
+      title: STRING,
+      document_type: STRING,
+      metadata: { type: 'object' },
+      /** SHA-256 of the id, title, type and content, so any change to what was analysed changes it. */
+      sha256: STRING,
+      content: STRING,
+    }),
+  },
   /** The project's other documents, which are not specifications and are not analysed. */
-  readonly set_aside: readonly { readonly id: string; readonly title: string; readonly document_type: string | null }[];
+  set_aside: { type: 'array', items: object({ id: STRING, title: STRING, document_type: { type: ['string', 'null'] } }) },
+});
+
+export type IntakeSources = Infer<typeof SOURCES_SCHEMA>;
+type IntakeSource = IntakeSources['documents'][number];
+
+export function parseIntakeSources(value: unknown): IntakeSources {
+  const problems: string[] = [];
+  if (!conforms(SOURCES_SCHEMA, value, 'sources', problems)) refuseRunFile('sources.json', problems);
+  return value;
 }
 
 function sha256(value: unknown): string {
@@ -177,18 +200,20 @@ export async function readIntakeSources(target: IntakeTarget): Promise<IntakeSou
 
 // --- the marker -------------------------------------------------------------------------
 
-const KEY = /^[a-z0-9][a-z0-9-]{2,80}$/;
+/** A lot's or planned task's key: the one pattern the plan schema, the task list and the marker share. */
+const KEY_PATTERN = '^[a-z0-9][a-z0-9-]{2,80}$';
+const KEY = { type: 'string', pattern: KEY_PATTERN } as const;
 const MARKER_OPEN = '<!-- archon-project-intake ';
 const MARKER_CLOSE = ' -->';
 /**
- * Text that opens an intake comment in any spacing or case. A description holding one
+ * Whether text opens an intake comment in any spacing or case. A description holding one
  * anywhere but its canonical first line is corrupt metadata, never an unrelated task:
  * read as no intake task, its planned task would be created a second time.
  */
-const INTAKE_METADATA = /<!--\s*archon-project-intake/i;
+const isIntakeMetadata = (text: string): boolean => opensTaskMetadata('archon-project-intake', text);
 
 export function isIntakeKey(value: unknown): value is string {
-  return typeof value === 'string' && KEY.test(value);
+  return typeof value === 'string' && new RegExp(KEY_PATTERN, 'u').test(value);
 }
 
 /** The first line of a task intake created for the planned task `key`. */
@@ -200,10 +225,10 @@ export function intakeMarker(key: string): string {
 /** The planned task key a task's description records, or null when it holds no intake metadata. */
 function intakeKeyOf(task: ArchonTask): string | null {
   const description = task.description ?? '';
-  if (!INTAKE_METADATA.test(description)) return null;
+  if (!isIntakeMetadata(description)) return null;
   const [first = '', ...rest] = description.split(/\r?\n/);
   const key = first.startsWith(MARKER_OPEN) && first.endsWith(MARKER_CLOSE) ? first.slice(MARKER_OPEN.length, -MARKER_CLOSE.length) : '';
-  if (!isIntakeKey(key) || rest.some(line => INTAKE_METADATA.test(line))) {
+  if (!isIntakeKey(key) || rest.some(isIntakeMetadata)) {
     throw new ProjectIntakeError(
       `task ${task.id} carries archon-project-intake metadata that is not one canonical marker on its first line; fix or remove it before running the intake again.`
     );
@@ -230,140 +255,73 @@ export function intakeTasks(tasks: readonly ArchonTask[]): Map<string, ArchonTas
   return new Map([...byKey].map(([key, [task]]) => [key, task as ArchonTask]));
 }
 
+/** `intake/tasks.json`: the tasks an earlier intake created, which the plan agent reuses the keys of. */
+const TASK_SUMMARIES_SCHEMA = {
+  type: 'array',
+  items: object({ key: KEY, title: STRING, status: STRING, archived: { type: 'boolean' }, url: STRING }),
+} as const;
+
+export type IntakeTaskSummary = Infer<typeof TASK_SUMMARIES_SCHEMA>[number];
+
+export function intakeTaskSummaries(tracker: ArchonTracker, tasks: ReadonlyMap<string, ArchonTask>): IntakeTaskSummary[] {
+  return [...tasks].map(([key, task]) => ({ key, title: task.title, status: task.status, archived: task.archived, url: tracker.taskUrl(task.id) }));
+}
+
+export function parseIntakeTaskSummaries(value: unknown): readonly IntakeTaskSummary[] {
+  const problems: string[] = [];
+  if (!conforms(TASK_SUMMARIES_SCHEMA, value, 'tasks', problems)) refuseRunFile('tasks.json', problems);
+  const repeated = duplicates(value.map(task => task.key));
+  if (repeated.length > 0) refuseRunFile('tasks.json', [`it lists ${repeated.join(', ')} more than once`]);
+  return value;
+}
+
 // --- the plan ---------------------------------------------------------------------------
 
-/** The plan agent's statuses; the workflow's plan schema must admit exactly these. */
-export const PLAN_STATUSES = ['ready', 'insufficient'] as const;
-/** The task priorities; the workflow's plan schema must admit exactly these. */
-export const PRIORITIES = ['critical', 'high', 'medium', 'low'] as const;
+const PLAN_STATUSES = ['ready', 'insufficient'] as const;
+const PRIORITIES = ['critical', 'high', 'medium', 'low'] as const;
 
-export interface SourceRef {
-  readonly document_id: string;
-  /** Where in the document: a section heading, a numbered requirement, or a short quote. */
-  readonly location: string;
-}
+/** Text with something in it. */
+const TEXT = { type: 'string', pattern: '\\S' } as const;
+/** One line with something in it. */
+const LINE = { type: 'string', pattern: '^[^\\r\\n]*\\S[^\\r\\n]*$' } as const;
+/** Where a source says something: a document's id, and a section heading, a numbered requirement or a short quote in it. */
+const SOURCE_REFS = { type: 'array', items: object({ document_id: TEXT, location: TEXT }) } as const;
+const CITED = { ...SOURCE_REFS, minItems: 1 } as const;
 
-export interface SourcedStatement {
-  readonly text: string;
-  readonly source_refs: readonly SourceRef[];
-}
+/**
+ * The plan agent's output. The plan node's `output_format` is this schema, held equal to
+ * it by a test, and `parsePlan` checks the agent's output against it before the rules no
+ * schema expresses.
+ */
+export const PLAN_SCHEMA = object({
+  status: { type: 'string', enum: PLAN_STATUSES },
+  reason: STRING,
+  objective: STRING,
+  scope: object({ included: { type: 'array', items: TEXT }, excluded: { type: 'array', items: TEXT } }),
+  assumptions: { type: 'array', items: object({ text: TEXT, source_refs: CITED }) },
+  constraints: { type: 'array', items: object({ text: TEXT, source_refs: CITED }) },
+  lots: { type: 'array', items: object({ key: KEY, title: LINE, summary: TEXT }) },
+  tasks: {
+    type: 'array',
+    items: object({
+      key: KEY,
+      lot: KEY,
+      title: LINE,
+      description: TEXT,
+      priority: { type: 'string', enum: PRIORITIES },
+      dependencies: { type: 'array', items: KEY },
+      acceptance_criteria: { type: 'array', items: TEXT, minItems: 1 },
+      source_refs: CITED,
+    }),
+  },
+  open_questions: { type: 'array', items: object({ text: TEXT, blocking: { type: 'boolean' }, source_refs: SOURCE_REFS }) },
+  risks: { type: 'array', items: object({ text: TEXT, source_refs: SOURCE_REFS }) },
+});
 
-export interface OpenQuestion extends SourcedStatement {
-  readonly blocking: boolean;
-}
-
-export interface PlannedLot {
-  readonly key: string;
-  readonly title: string;
-  readonly summary: string;
-}
-
-export interface PlannedTask {
-  readonly key: string;
-  readonly lot: string;
-  readonly title: string;
-  readonly description: string;
-  readonly priority: (typeof PRIORITIES)[number];
-  readonly dependencies: readonly string[];
-  readonly acceptance_criteria: readonly string[];
-  readonly source_refs: readonly SourceRef[];
-}
-
-/** The plan agent's output, as the workflow's plan schema admits it. */
-export interface IntakePlan {
-  readonly status: (typeof PLAN_STATUSES)[number];
-  readonly reason: string;
-  readonly objective: string;
-  readonly scope: { readonly included: readonly string[]; readonly excluded: readonly string[] };
-  readonly assumptions: readonly SourcedStatement[];
-  readonly constraints: readonly SourcedStatement[];
-  readonly lots: readonly PlannedLot[];
-  readonly tasks: readonly PlannedTask[];
-  readonly open_questions: readonly OpenQuestion[];
-  readonly risks: readonly SourcedStatement[];
-}
-
-/** Collects every way a value is not a plan, so one refusal names them all. */
-class PlanReader {
-  readonly problems: string[] = [];
-
-  constructor(private readonly documentIds: ReadonlySet<string>) {}
-
-  text(value: unknown, at: string, required = true): string {
-    if (typeof value !== 'string' || (required && value.trim() === '')) {
-      this.problems.push(`${at} is not ${required ? 'a non-empty' : 'a'} string`);
-      return '';
-    }
-    if (INTAKE_METADATA.test(value) || mentionsDiscoveryMetadata(value)) {
-      this.problems.push(`${at} holds tracker metadata, which would leave its task unreadable to a later pass`);
-    }
-    return value;
-  }
-
-  line(value: unknown, at: string): string {
-    const text = this.text(value, at);
-    if (/[\r\n]/.test(text)) this.problems.push(`${at} is not one line`);
-    return text;
-  }
-
-  list<T>(value: unknown, at: string, item: (entry: unknown, at: string) => T, minimum = 0): T[] {
-    if (!Array.isArray(value)) {
-      this.problems.push(`${at} is not a list`);
-      return [];
-    }
-    if (value.length < minimum) this.problems.push(`${at} has fewer than ${String(minimum)} entries`);
-    return value.map((entry, index) => item(entry, `${at}[${String(index)}]`));
-  }
-
-  object(value: unknown, at: string): Record<string, unknown> {
-    if (isObject(value)) return value;
-    this.problems.push(`${at} is not an object`);
-    return {};
-  }
-
-  key(value: unknown, at: string): string {
-    if (isIntakeKey(value)) return value;
-    this.problems.push(`${at} is not a key (lowercase letters, digits and dashes, 3 to 81 characters)`);
-    return '';
-  }
-
-  ref = (value: unknown, at: string): SourceRef => {
-    const entry = this.object(value, at);
-    const document_id = this.text(entry.document_id, `${at}.document_id`);
-    if (document_id !== '' && !this.documentIds.has(document_id)) this.problems.push(`${at} cites ${document_id}, which is not an analysed source`);
-    return { document_id, location: this.text(entry.location, `${at}.location`) };
-  };
-
-  statement = (value: unknown, at: string, minimumRefs: number): SourcedStatement => {
-    const entry = this.object(value, at);
-    return { text: this.text(entry.text, `${at}.text`), source_refs: this.list(entry.source_refs, `${at}.source_refs`, this.ref, minimumRefs) };
-  };
-
-  oneOf<T extends string>(value: unknown, at: string, allowed: readonly T[]): T {
-    if (allowed.includes(value as T)) return value as T;
-    this.problems.push(`${at} is not one of ${allowed.join(', ')}`);
-    return allowed[0] as T;
-  }
-}
-
-function lotOf(reader: PlanReader, value: unknown, at: string): PlannedLot {
-  const entry = reader.object(value, at);
-  return { key: reader.key(entry.key, `${at}.key`), title: reader.line(entry.title, `${at}.title`), summary: reader.text(entry.summary, `${at}.summary`) };
-}
-
-function taskOf(reader: PlanReader, value: unknown, at: string): PlannedTask {
-  const entry = reader.object(value, at);
-  return {
-    key: reader.key(entry.key, `${at}.key`),
-    lot: reader.key(entry.lot, `${at}.lot`),
-    title: reader.line(entry.title, `${at}.title`),
-    description: reader.text(entry.description, `${at}.description`),
-    priority: reader.oneOf(entry.priority, `${at}.priority`, PRIORITIES),
-    dependencies: reader.list(entry.dependencies, `${at}.dependencies`, (dependency, where) => reader.key(dependency, where)),
-    acceptance_criteria: reader.list(entry.acceptance_criteria, `${at}.acceptance_criteria`, (criterion, where) => reader.text(criterion, where), 1),
-    source_refs: reader.list(entry.source_refs, `${at}.source_refs`, reader.ref, 1),
-  };
-}
+export type IntakePlan = Infer<typeof PLAN_SCHEMA>;
+export type PlannedLot = IntakePlan['lots'][number];
+export type PlannedTask = IntakePlan['tasks'][number];
+type SourceRef = PlannedTask['source_refs'][number];
 
 function duplicates(keys: readonly string[]): string[] {
   return [...new Set(keys.filter((key, index) => key !== '' && keys.indexOf(key) !== index))];
@@ -409,51 +367,77 @@ function graphProblems(lots: readonly PlannedLot[], tasks: readonly PlannedTask[
   }
 }
 
+/** Every string in a value, by its path. */
+function stringsIn(value: unknown, at: string): [string, string][] {
+  if (typeof value === 'string') return [[at, value]];
+  if (Array.isArray(value)) return value.flatMap((entry, index) => stringsIn(entry, `${at}[${String(index)}]`));
+  if (isObject(value)) return Object.entries(value).flatMap(([field, entry]) => stringsIn(entry, `${at}.${field}`));
+  return [];
+}
+
+/**
+ * What the plan schema cannot say: which fields a status requires, that every citation
+ * is an analysed source, that no text holds task metadata, and that the lots and
+ * dependencies hold together.
+ */
+function planProblems(plan: IntakePlan, at: string, documentIds: ReadonlySet<string>): string[] {
+  const ready = plan.status === 'ready';
+  const problems = [
+    ...(!ready && plan.reason.trim() === '' ? [`${at}.reason is empty, but an insufficient plan says why`] : []),
+    ...(ready && plan.objective.trim() === '' ? [`${at}.objective is empty in a ready plan`] : []),
+    ...(ready && plan.lots.length === 0 ? [`${at}.lots is empty in a ready plan`] : []),
+    ...(ready && plan.tasks.length === 0 ? [`${at}.tasks is empty in a ready plan`] : []),
+  ];
+  const cited: [string, readonly { readonly source_refs: readonly SourceRef[] }[]][] = [
+    ['assumptions', plan.assumptions],
+    ['constraints', plan.constraints],
+    ['tasks', plan.tasks],
+    ['open_questions', plan.open_questions],
+    ['risks', plan.risks],
+  ];
+  for (const [field, entries] of cited) {
+    entries.forEach((entry, index) =>
+      entry.source_refs.forEach((ref, refIndex) => {
+        if (!documentIds.has(ref.document_id)) {
+          problems.push(`${at}.${field}[${String(index)}].source_refs[${String(refIndex)}] cites ${ref.document_id}, which is not an analysed source`);
+        }
+      })
+    );
+  }
+  for (const [where, text] of stringsIn(plan, at)) {
+    const metadata = taskMetadataIn(text);
+    if (metadata.length > 0) problems.push(`${where} holds ${metadata.join(' and ')} metadata, which would leave its task unreadable to a later pass`);
+  }
+  return problems.length > 0 ? problems : graphProblems(plan.lots, plan.tasks);
+}
+
 /**
  * The plan in `value`, every source it cites one of the analysed documents. Anything
  * else refuses, naming every problem: a plan that does not hold together is not shown
  * to the operator for approval.
  */
 export function parsePlan(value: unknown, sources: { readonly documents: readonly { readonly id: string }[] }): IntakePlan {
-  const reader = new PlanReader(new Set(sources.documents.map(document => document.id)));
-  const plan = reader.object(value, 'plan');
-  const status = reader.oneOf(plan.status, 'status', PLAN_STATUSES);
-  const scope = reader.object(plan.scope, 'scope');
-  const parsed: IntakePlan = {
-    status,
-    reason: reader.text(plan.reason, 'reason', status === 'insufficient'),
-    objective: reader.text(plan.objective, 'objective', status === 'ready'),
-    scope: {
-      included: reader.list(scope.included, 'scope.included', (entry, at) => reader.text(entry, at)),
-      excluded: reader.list(scope.excluded, 'scope.excluded', (entry, at) => reader.text(entry, at)),
-    },
-    assumptions: reader.list(plan.assumptions, 'assumptions', (entry, at) => reader.statement(entry, at, 1)),
-    constraints: reader.list(plan.constraints, 'constraints', (entry, at) => reader.statement(entry, at, 1)),
-    lots: reader.list(plan.lots, 'lots', (entry, at) => lotOf(reader, entry, at), status === 'ready' ? 1 : 0),
-    tasks: reader.list(plan.tasks, 'tasks', (entry, at) => taskOf(reader, entry, at), status === 'ready' ? 1 : 0),
-    open_questions: reader.list(plan.open_questions, 'open_questions', (entry, at) => {
-      const question = reader.object(entry, at);
-      if (typeof question.blocking !== 'boolean') reader.problems.push(`${at}.blocking is not true or false`);
-      return { ...reader.statement(entry, at, 0), blocking: question.blocking === true };
-    }),
-    risks: reader.list(plan.risks, 'risks', (entry, at) => reader.statement(entry, at, 0)),
-  };
-  const problems = [...reader.problems, ...(reader.problems.length === 0 ? graphProblems(parsed.lots, parsed.tasks) : [])];
-  if (problems.length > 0) throw new ProjectIntakeError(`the plan does not hold together: ${problems.join('; ')}`);
-  return parsed;
+  const problems: string[] = [];
+  if (conforms(PLAN_SCHEMA, value, 'plan', problems)) {
+    problems.push(...planProblems(value, 'plan', new Set(sources.documents.map(document => document.id))));
+    if (problems.length === 0) return value;
+  }
+  throw new ProjectIntakeError(`the plan does not hold together: ${problems.join('; ')}`);
 }
 
 // --- the approved plan and its writes -----------------------------------------------------
 
 /** `intake/plan.json`: a ready plan, with the identity and sources it was made from. */
-export interface IntakePlanFile {
-  readonly project_id: string;
-  readonly repo: Repo;
-  readonly tracker_base_url: string;
-  readonly fingerprint: string;
-  readonly documents: readonly { readonly id: string; readonly title: string; readonly sha256: string }[];
-  readonly plan: IntakePlan;
-}
+const PLAN_FILE_SCHEMA = object({
+  project_id: STRING,
+  repo: REPO,
+  tracker_base_url: STRING,
+  fingerprint: STRING,
+  documents: { type: 'array', items: object({ id: STRING, title: STRING, sha256: STRING }) },
+  plan: PLAN_SCHEMA,
+});
+
+export type IntakePlanFile = Infer<typeof PLAN_FILE_SCHEMA>;
 
 export function planFile(sources: IntakeSources, plan: IntakePlan): IntakePlanFile {
   return {
@@ -468,28 +452,11 @@ export function planFile(sources: IntakeSources, plan: IntakePlan): IntakePlanFi
 
 /** A plan file as it was written, its plan checked again against the sources it records. */
 export function parsePlanFile(value: unknown): IntakePlanFile {
-  if (
-    !isObject(value) ||
-    typeof value.project_id !== 'string' ||
-    !isObject(value.repo) ||
-    typeof value.repo.host !== 'string' ||
-    typeof value.repo.path !== 'string' ||
-    typeof value.tracker_base_url !== 'string' ||
-    typeof value.fingerprint !== 'string' ||
-    !Array.isArray(value.documents) ||
-    !value.documents.every(document => isObject(document) && typeof document.id === 'string' && typeof document.title === 'string' && typeof document.sha256 === 'string')
-  ) {
-    throw new ProjectIntakeError('intake/plan.json is not a plan file this workflow wrote.');
-  }
-  const documents = value.documents as IntakePlanFile['documents'];
-  return {
-    project_id: value.project_id,
-    repo: { host: value.repo.host, path: value.repo.path },
-    tracker_base_url: value.tracker_base_url,
-    fingerprint: value.fingerprint,
-    documents,
-    plan: parsePlan(value.plan, { documents }),
-  };
+  const problems: string[] = [];
+  if (!conforms(PLAN_FILE_SCHEMA, value, 'plan_file', problems)) refuseRunFile('plan.json', problems);
+  const planned = planProblems(value.plan, 'plan_file.plan', new Set(value.documents.map(document => document.id)));
+  if (planned.length > 0) refuseRunFile('plan.json', planned);
+  return value;
 }
 
 const STALE = 'The approved plan was made for what this run analysed; run the intake again to plan from what is there now.';
@@ -534,14 +501,17 @@ function sourceChange(file: IntakePlanFile, current: IntakeSources): string {
   return `the project's specifications changed since they were analysed (${parts.join('; ') || 'the project changed'})`;
 }
 
-/** A planned task's description: its marker, the agent's description, then the plan's metadata about it. */
+/**
+ * A planned task's description: its marker, the agent's description, then the plan's
+ * metadata about it. Below the marker it must hold no task metadata of any workflow,
+ * which a document title could still carry in; the plan's own text was checked already.
+ */
 export function intakeTaskDescription(task: PlannedTask, file: IntakePlanFile): string {
   const lot = file.plan.lots.find(entry => entry.key === task.lot);
   const titles = new Map(file.plan.tasks.map(entry => [entry.key, entry.title]));
   const documents = new Map(file.documents.map(document => [document.id, document.title]));
   const dependencies = task.dependencies.map(key => `\`${key}\` ${titles.get(key) ?? ''}`.trim());
-  return [
-    intakeMarker(task.key),
+  const body = [
     task.description.trim(),
     '',
     `**Lot:** ${lot?.title ?? task.lot} (\`${task.lot}\`)`,
@@ -557,6 +527,11 @@ export function intakeTaskDescription(task: PlannedTask, file: IntakePlanFile): 
     '---',
     `Planned by the archon-project-intake workflow from the project's specifications at fingerprint ${file.fingerprint.slice(0, 12)}.`,
   ].join('\n');
+  const metadata = taskMetadataIn(body);
+  if (metadata.length > 0) {
+    throw new ProjectIntakeError(`nothing was written: task ${task.key}'s description would hold ${metadata.join(' and ')} metadata, which would leave it unreadable to a later pass.`);
+  }
+  return `${intakeMarker(task.key)}\n${body}`;
 }
 
 export interface WrittenTask {
@@ -567,33 +542,51 @@ export interface WrittenTask {
 /**
  * Create each planned task the project does not already hold, dependencies first. A task
  * an earlier run created is recovered by its marker, archived or not, and left as it is.
- * A failure partway names what this run created; running again recovers those.
+ * Every description is rendered before the first request, so one that would be refused
+ * refuses with nothing written.
  */
 export async function createPlannedTasks(
   tracker: ArchonTracker,
   file: IntakePlanFile
 ): Promise<{ created: WrittenTask[]; recovered: WrittenTask[] }> {
+  const planned = creationOrder(file.plan.tasks).map(task => ({ task, description: intakeTaskDescription(task, file) }));
   const existing = intakeTasks(await tracker.listProjectTasks());
   const created: WrittenTask[] = [];
   const recovered: WrittenTask[] = [];
-  for (const task of creationOrder(file.plan.tasks)) {
+  for (const { task, description } of planned) {
     const found = existing.get(task.key);
     if (found !== undefined) {
       recovered.push({ key: task.key, url: tracker.taskUrl(found.id) });
       continue;
     }
     try {
-      const id = await tracker.createTask({ title: task.title, description: intakeTaskDescription(task, file), status: 'todo' });
+      const id = await tracker.createTask({ title: task.title, description, status: 'todo' });
       created.push({ key: task.key, url: tracker.taskUrl(id) });
     } catch (error) {
-      const done = created.length === 0 ? 'no task' : created.map(entry => entry.key).join(', ');
-      throw new ProjectIntakeError(
-        `creating ${task.key} failed after this run created ${done}; running the intake's create step again recovers what was created: ${error instanceof Error ? error.message : String(error)}`,
-        { cause: error }
-      );
+      throw creationFailure(task.key, created, error);
     }
   }
   return { created, recovered };
+}
+
+/**
+ * Why creating `key` stopped the run, and what a rerun does. Only a task the tracker
+ * refused is known not to exist; one it may have stored, unconfirmed, is left for the
+ * operator to check, since a rerun recovers it only if its marker survived.
+ */
+function creationFailure(key: string, created: readonly WrittenTask[], error: unknown): ProjectIntakeError {
+  const earlier =
+    created.length === 0
+      ? 'This run created no task before it.'
+      : `This run created ${created.map(entry => entry.key).join(', ')} before it, each read back as sent.`;
+  const message = error instanceof Error ? error.message : String(error);
+  if (error instanceof UnconfirmedTaskError) {
+    return new ProjectIntakeError(`creating ${key} was not confirmed: ${message} Its marker is ${intakeMarker(key)}. ${earlier}`, { cause: error });
+  }
+  return new ProjectIntakeError(
+    `the tracker refused to create ${key}: ${message} ${earlier} Running the create step again recovers what this run created and creates the rest.`,
+    { cause: error }
+  );
 }
 
 /** The question the approval gate asks: what was read, what would be written, and what is unsettled. */

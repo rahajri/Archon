@@ -20,6 +20,7 @@ import type { QualifiedPr } from './forge.ts';
 import type { TrackerKind } from './project-context.ts';
 import type { fetchDefaultBranch } from './remote.ts';
 import type { DiscoveryRecord } from './report.ts';
+import { opensTaskMetadata } from './task-metadata.ts';
 import { isObject } from './typed.ts';
 
 export const RUNS_PREFIX = 'discoveries/runs/';
@@ -260,16 +261,11 @@ const MARKER_OPEN = '<!-- archon-discovery ';
 const REFS_OPEN = '<!-- archon-discovery-refs ';
 const COMMENT_CLOSE = ' -->';
 /**
- * Text that opens an archon-discovery comment in any spacing or case. A description that
- * holds one anywhere but the canonical header is corrupt metadata, never an unrelated
- * task: read as no filing, its discovery would be filed a second time.
+ * Whether a line opens an archon-discovery comment in any spacing or case. A description
+ * that holds one anywhere but the canonical header is corrupt metadata, never an
+ * unrelated task: read as no filing, its discovery would be filed a second time.
  */
-const METADATA = /<!--\s*archon-discovery/i;
-
-/** Whether text would read as discovery metadata on a tracker task. */
-export function mentionsDiscoveryMetadata(text: string): boolean {
-  return METADATA.test(text);
-}
+const isMetadata = (text: string): boolean => opensTaskMetadata('archon-discovery', text);
 
 /** The marker on a filed issue's or task's first line, and on an evidence comment's. */
 export function discoveryMarker(key: string): string {
@@ -321,13 +317,13 @@ function refsOf(task: ArchonTask, line: string): string[] {
  */
 function filedDiscovery(task: ArchonTask): FiledDiscovery | null {
   const description = task.description ?? '';
-  if (!METADATA.test(description)) return null;
+  if (!isMetadata(description)) return null;
   const [first = '', second = '', ...rest] = description.split(/\r?\n/);
   const key = payload(task, first, MARKER_OPEN, 'marker');
   if (!isKey(key)) corrupt(task, 'its marker does not carry a decision key');
-  const refs = METADATA.test(second) ? refsOf(task, second) : [];
+  const refs = isMetadata(second) ? refsOf(task, second) : [];
   const brief = refs.length === 0 ? [second, ...rest] : rest;
-  if (brief.some(line => METADATA.test(line))) corrupt(task, 'it carries discovery metadata after its header');
+  if (brief.some(isMetadata)) corrupt(task, 'it carries discovery metadata after its header');
   return { key, refs, task };
 }
 

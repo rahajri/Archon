@@ -12,12 +12,18 @@
 import { readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { artifactsDir, emit, nullableJson, refuse } from '../../.shared/io.ts';
-import { approvalQuestion, type IntakeSources, parsePlan, planFile } from '../../.shared/project-intake.ts';
+import {
+  approvalQuestion,
+  parseIntakeSources,
+  parseIntakeTaskSummaries,
+  parsePlan,
+  planFile,
+} from '../../.shared/project-intake.ts';
 
 try {
   const intake = join(artifactsDir(), 'intake');
-  const sources = JSON.parse(readFileSync(join(intake, 'sources.json'), 'utf8')) as IntakeSources;
-  const existing = JSON.parse(readFileSync(join(intake, 'tasks.json'), 'utf8')) as { key: string }[];
+  const sources = parseIntakeSources(JSON.parse(readFileSync(join(intake, 'sources.json'), 'utf8')));
+  const existing = parseIntakeTaskSummaries(JSON.parse(readFileSync(join(intake, 'tasks.json'), 'utf8')));
   const plan = parsePlan(nullableJson(process.env.INPUTS_PLAN), sources);
   if (plan.status === 'insufficient') {
     throw new Error(`nothing was planned: the specifications are not enough to plan from without guessing. ${plan.reason.trim()}`);

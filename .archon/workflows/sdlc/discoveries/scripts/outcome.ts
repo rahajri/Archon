@@ -39,7 +39,6 @@ import {
   filedDiscoveries,
   filingsOf,
   filingTargetOf,
-  mentionsDiscoveryMetadata,
   parseFilingTarget,
   parseRunDocument,
   type Question,
@@ -53,6 +52,7 @@ import { artifactsDir, emit, nullableJson, refuse, text, trimmed } from '../../.
 import { createIssue, viewIssue } from '../../.shared/issue.ts';
 import { upsertComment } from '../../.shared/pr.ts';
 import { stateGet, statePut } from '../../.shared/state.ts';
+import { taskMetadataIn } from '../../.shared/task-metadata.ts';
 
 const IDLE = 'No finished run has undecided discoveries.';
 
@@ -83,14 +83,16 @@ function newTask(decision: AgentDecision & { outcome: 'file' }, sha: string): Ne
 /**
  * The tracker task each filing recovers instead of creating one, by key: the task that
  * carries its key's marker or any of its refs. A filing two tasks match is a problem, and
- * so is a brief holding discovery metadata, which would make its task read as corrupt.
+ * so is a brief holding any workflow's task metadata, which would make its task read as
+ * corrupt to that workflow.
  */
 function recoveredTasks(filed: readonly FiledDiscovery[], decisions: readonly AgentDecision[], problems: string[]): Map<string, string> {
   const recovered = new Map<string, string>();
   for (const decision of decisions) {
     if (decision.outcome !== 'file') continue;
-    if (mentionsDiscoveryMetadata(decision.body)) {
-      problems.push(`key ${decision.key}'s body holds archon-discovery metadata, which would leave its task unreadable to a later pass`);
+    const metadata = taskMetadataIn(decision.body);
+    if (metadata.length > 0) {
+      problems.push(`key ${decision.key}'s body holds ${metadata.join(' and ')} metadata, which would leave its task unreadable to a later pass`);
     }
     const tasks = filingsOf(filed, decision);
     if (tasks.length > 1) {

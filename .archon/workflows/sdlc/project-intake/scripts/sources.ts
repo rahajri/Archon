@@ -12,18 +12,12 @@
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { emit, artifactsDir, refuse } from '../../.shared/io.ts';
-import { intakeTarget, intakeTasks, readIntakeSources } from '../../.shared/project-intake.ts';
+import { intakeTarget, intakeTaskSummaries, intakeTasks, readIntakeSources } from '../../.shared/project-intake.ts';
 
 try {
   const target = intakeTarget(process.cwd(), process.env.ARCHON_TRACKER_BASE_URL);
   const sources = await readIntakeSources(target);
-  const existing = [...intakeTasks(await target.tracker.listProjectTasks())].map(([key, task]) => ({
-    key,
-    title: task.title,
-    status: task.status,
-    archived: task.archived,
-    url: target.tracker.taskUrl(task.id),
-  }));
+  const existing = intakeTaskSummaries(target.tracker, intakeTasks(await target.tracker.listProjectTasks()));
   const intake = join(artifactsDir(), 'intake');
   mkdirSync(intake, { recursive: true });
   writeFileSync(join(intake, 'sources.json'), `${JSON.stringify(sources, null, 2)}\n`);

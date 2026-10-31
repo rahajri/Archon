@@ -1,11 +1,11 @@
-import { describe, expect, test } from 'bun:test';
+import { afterEach, describe, expect, test } from 'bun:test';
 import { spawnSync } from 'node:child_process';
 import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { trackTempRoots } from './temp-roots';
 import { PACK } from './deliver-checks-harness';
-import { ArchonTrackerError } from '../../workflows/sdlc/.shared/archon-tracker';
+import { ArchonTrackerError, UnconfirmedTaskError } from '../../workflows/sdlc/.shared/archon-tracker';
 import {
   assertSameSources,
   assertSameTarget,
@@ -15,11 +15,12 @@ import {
   intakeTaskDescription,
   intakeTasks,
   type IntakeSources,
+  parseIntakeSources,
+  parseIntakeTaskSummaries,
   parsePlan,
   parsePlanFile,
-  PLAN_STATUSES,
+  PLAN_SCHEMA,
   planFile,
-  PRIORITIES,
   readIntakeSources,
 } from '../../workflows/sdlc/.shared/project-intake';
 import { ProjectContextError } from '../../workflows/sdlc/.shared/project-context';
@@ -100,6 +101,10 @@ interface Tracker {
   requests: { method: string; path: string; body: unknown }[];
   /** Fail every task creation after this many succeeded. */
   failCreatesAfter?: number;
+  /** Store a created task and answer its creation, but fail reading it back. */
+  failReadBack?: boolean;
+  /** How the tracker stores a created task; it answers the creation with the task as sent. */
+  stores?: (task: Task) => Task;
   /** Answer project reads as if they were another project's. */
   answerAs?: string;
 }
@@ -135,6 +140,7 @@ const ROUTES: Record<string, Route[]> = {
     },
     (state, url) => {
       if (!url.pathname.startsWith('/api/tasks/')) return undefined;
+      if (state.failReadBack) return new Response('Internal Server Error', { status: 500 });
       const task = state.tasks.find(entry => url.pathname === `/api/tasks/${entry.id}`);
       return task === undefined ? notFound('Task not found') : Response.json(task);
     },
@@ -145,7 +151,7 @@ const ROUTES: Record<string, Route[]> = {
       const earlier = state.requests.filter(entry => entry.method === 'POST').length - 1;
       if (state.failCreatesAfter !== undefined && earlier >= state.failCreatesAfter) return new Response('Internal Server Error', { status: 500 });
       const task = { id: `task-${String(state.tasks.length + 1)}`, archived: false, description: null, ...body } as Task;
-      state.tasks.push(task);
+      state.tasks.push(state.stores?.({ ...task }) ?? task);
       return Response.json({ message: 'Task created successfully', task });
     },
   ],
@@ -372,29 +378,46 @@ describe('the plan', () => {
     ['a dependency cycle', { tasks: [plannedTask('a-task', ['b-task']), plannedTask('b-task', ['a-task'])] }, 'the dependencies of a-task, b-task form a cycle'],
     ['a task in an undeclared lot', { tasks: [plannedTask('a-task', [], 'nowhere')] }, 'task a-task is in lot nowhere'],
     ['a duplicate task key', { tasks: [plannedTask('a-task'), plannedTask('a-task')] }, 'task key a-task is used more than once'],
-    ['a task without acceptance criteria', { tasks: [{ ...plannedTask('a-task'), acceptance_criteria: [] }] }, 'tasks[0].acceptance_criteria has fewer than 1 entries'],
-    ['a task without sources', { tasks: [{ ...plannedTask('a-task'), source_refs: [] }] }, 'tasks[0].source_refs has fewer than 1 entries'],
-    ['a citation of a document not analysed', { tasks: [{ ...plannedTask('a-task'), source_refs: [ref('doc-x')] }] }, 'cites doc-x, which is not an analysed source'],
-    ['an assumption without a source', { assumptions: [{ text: 'Guessed.', source_refs: [] }] }, 'assumptions[0].source_refs has fewer than 1 entries'],
-    ['a malformed key', { tasks: [{ ...plannedTask('a-task'), key: 'A Task' }] }, 'tasks[0].key is not a key'],
-    ['a multi-line title', { tasks: [{ ...plannedTask('a-task'), title: 'one\ntwo' }] }, 'tasks[0].title is not one line'],
-    ['an unknown priority', { tasks: [{ ...plannedTask('a-task'), priority: 'urgent' }] }, 'tasks[0].priority is not one of'],
-    ['intake metadata in a description', { tasks: [{ ...plannedTask('a-task'), description: '<!-- archon-project-intake x-y-z -->' }] }, 'tasks[0].description holds tracker metadata'],
-    ['discovery metadata in a description', { tasks: [{ ...plannedTask('a-task'), description: '<!--archon-discovery x -->' }] }, 'tasks[0].description holds tracker metadata'],
-    ['a ready plan with no task', { tasks: [] }, 'tasks has fewer than 1 entries'],
-    ['an insufficient plan with no reason', { status: 'insufficient', reason: ' ', lots: [], tasks: [] }, 'reason is not a non-empty string'],
+    ['a task without acceptance criteria', { tasks: [{ ...plannedTask('a-task'), acceptance_criteria: [] }] }, 'plan.tasks[0].acceptance_criteria has fewer than 1 entries'],
+    ['a blank acceptance criterion', { tasks: [{ ...plannedTask('a-task'), acceptance_criteria: [' '] }] }, 'plan.tasks[0].acceptance_criteria[0] does not match'],
+    ['a task without sources', { tasks: [{ ...plannedTask('a-task'), source_refs: [] }] }, 'plan.tasks[0].source_refs has fewer than 1 entries'],
+    ['a citation of a document not analysed', { tasks: [{ ...plannedTask('a-task'), source_refs: [ref('doc-x')] }] }, 'plan.tasks[0].source_refs[0] cites doc-x, which is not an analysed source'],
+    ['a citation of a document not analysed in a risk', { risks: [{ text: 'Late.', source_refs: [ref('doc-x')] }] }, 'plan.risks[0].source_refs[0] cites doc-x'],
+    ['a citation with no document', { tasks: [{ ...plannedTask('a-task'), source_refs: [{ document_id: '', location: 'here' }] }] }, 'plan.tasks[0].source_refs[0].document_id does not match'],
+    ['a citation with no location', { tasks: [{ ...plannedTask('a-task'), source_refs: [{ document_id: 'doc-1', location: ' ' }] }] }, 'plan.tasks[0].source_refs[0].location does not match'],
+    ['an assumption without a source', { assumptions: [{ text: 'Guessed.', source_refs: [] }] }, 'plan.assumptions[0].source_refs has fewer than 1 entries'],
+    ['a constraint without a source', { constraints: [{ text: 'Guessed.', source_refs: [] }] }, 'plan.constraints[0].source_refs has fewer than 1 entries'],
+    ['a blank scope item', { scope: { included: [''], excluded: [] } }, 'plan.scope.included[0] does not match'],
+    ['a malformed key', { tasks: [{ ...plannedTask('a-task'), key: 'A Task' }] }, 'plan.tasks[0].key does not match ^[a-z0-9][a-z0-9-]{2,80}$'],
+    ['a malformed lot key', { lots: [{ key: 'ab', title: 'Lot', summary: 'Its summary.' }] }, 'plan.lots[0].key does not match'],
+    ['a multi-line title', { tasks: [{ ...plannedTask('a-task'), title: 'one\ntwo' }] }, 'plan.tasks[0].title does not match'],
+    ['a blank lot title', { lots: [{ key: 'reception', title: ' ', summary: 'Its summary.' }] }, 'plan.lots[0].title does not match'],
+    ['an unknown priority', { tasks: [{ ...plannedTask('a-task'), priority: 'urgent' }] }, 'plan.tasks[0].priority is not one of critical, high, medium, low'],
+    ['an unknown status', { status: 'done' }, 'plan.status is not one of ready, insufficient'],
+    ['a field the schema does not declare', { estimate: '3 days' }, 'plan.estimate is not a field it declares'],
+    ['a missing field', { risks: undefined }, 'plan.risks is missing'],
+    ['an open question without its blocking flag', { open_questions: [{ text: 'Which?', source_refs: [] }] }, 'plan.open_questions[0].blocking is missing'],
+    ['intake metadata in a description', { tasks: [{ ...plannedTask('a-task'), description: '<!-- archon-project-intake x-y-z -->' }] }, 'plan.tasks[0].description holds archon-project-intake metadata'],
+    ['discovery metadata in a description', { tasks: [{ ...plannedTask('a-task'), description: '<!--archon-discovery x -->' }] }, 'plan.tasks[0].description holds archon-discovery metadata'],
+    ['discovery metadata in a criterion', { tasks: [{ ...plannedTask('a-task'), acceptance_criteria: ['Quotes <!-- ARCHON-DISCOVERY-refs [] -->'] }] }, 'plan.tasks[0].acceptance_criteria[0] holds archon-discovery metadata'],
+    ['a ready plan with no task', { tasks: [] }, 'plan.tasks is empty in a ready plan'],
+    ['a ready plan with no objective', { objective: ' ' }, 'plan.objective is empty in a ready plan'],
+    ['an insufficient plan with no reason', { status: 'insufficient', reason: ' ', lots: [], tasks: [] }, 'plan.reason is empty, but an insufficient plan says why'],
   ])('refuses %s', (_case, overrides, why) => {
-    expect(() => parsePlan(plan(overrides), sources)).toThrow(why);
+    const value = JSON.parse(JSON.stringify(plan(overrides))) as unknown;
+    expect(() => parsePlan(value, sources)).toThrow(why);
   });
 
-  test("the plan node's schema admits the statuses, priorities and fields the plan is read with", () => {
+  test('accepts an HTML comment that is no workflow\'s task metadata', () => {
+    const description = 'Keep <!-- generated --> markers and <!-- archon-notes --> as they are.';
+    expect(parsePlan(plan({ tasks: [{ ...plannedTask('a-task'), description }] }), sources).tasks[0]?.description).toBe(description);
+  });
+
+  test("the plan node's output_format is the schema the plan is checked against", () => {
     const workflow = Bun.YAML.parse(readFileSync(join(PACK, 'project-intake/archon-project-intake.yaml'), 'utf8')) as {
-      nodes: { id: string; output_format?: { required: string[]; properties: Record<string, { enum?: string[]; items?: { properties: Record<string, { enum?: string[] }> } }> } }[];
+      nodes: { id: string; output_format?: unknown }[];
     };
-    const schema = workflow.nodes.find(node => node.id === 'plan')?.output_format;
-    expect(schema?.properties.status?.enum).toEqual([...PLAN_STATUSES]);
-    expect(schema?.properties.tasks?.items?.properties.priority?.enum).toEqual([...PRIORITIES]);
-    expect([...(schema?.required ?? [])].sort()).toEqual(Object.keys(parsePlan(plan(), sources)).sort());
+    expect(workflow.nodes.find(node => node.id === 'plan')?.output_format).toEqual(JSON.parse(JSON.stringify(PLAN_SCHEMA)));
   });
 });
 
@@ -437,6 +460,34 @@ describe('the intake marker', () => {
   test('refuses two tasks with one key, archived or not', () => {
     const marker = `${intakeMarker('part-lot-link')}\nThe brief.`;
     expect(() => intakeTasks([task('t1', marker), task('t2', marker, true)])).toThrow('more than one task carries the intake marker of part-lot-link (tasks t1, t2)');
+  });
+});
+
+describe("the run's files", () => {
+  const summary = { key: 'part-lot-link', title: 'Build it', status: 'todo', archived: true, url: `${BASE}/api/tasks/t1` };
+
+  test('tasks.json reads back what the sources node writes', () => {
+    expect(parseIntakeTaskSummaries(JSON.parse(JSON.stringify([summary])))).toEqual([summary]);
+    expect(parseIntakeTaskSummaries([])).toEqual([]);
+  });
+
+  test.each([
+    ['not a list', { tasks: [summary] }, 'tasks is not a list'],
+    ['a key intake never writes', [{ ...summary, key: 'Part Lot Link' }], 'tasks[0].key does not match'],
+    ['a missing field', [{ key: summary.key, title: summary.title, status: summary.status, url: summary.url }], 'tasks[0].archived is missing'],
+    ['a field it does not write', [{ ...summary, description: 'x' }], 'tasks[0].description is not a field it declares'],
+    ['an archived flag that is not a boolean', [{ ...summary, archived: 'yes' }], 'tasks[0].archived is not true or false'],
+    ['one key twice', [summary, { ...summary, url: `${BASE}/api/tasks/t2` }], 'it lists part-lot-link more than once'],
+  ])('tasks.json holding %s is refused', (_case, value, why) => {
+    expect(() => parseIntakeTaskSummaries(value)).toThrow(`intake/tasks.json is not what this workflow wrote: `);
+    expect(() => parseIntakeTaskSummaries(value)).toThrow(why);
+  });
+
+  test('sources.json reads back what the sources node writes, and refuses anything else', async () => {
+    const sources = await sourcesOf(tracker([spec('doc-1'), { id: 'doc-0', title: 'Untyped', content: null }]));
+    expect(parseIntakeSources(JSON.parse(JSON.stringify(sources)))).toEqual(sources);
+    expect(() => parseIntakeSources({ ...sources, fingerprint: 7 })).toThrow('intake/sources.json is not what this workflow wrote: sources.fingerprint is not a string');
+    expect(() => parseIntakeSources({ ...sources, documents: [{ id: 'doc-1' }] })).toThrow('sources.documents[0].title is missing');
   });
 });
 
@@ -514,17 +565,75 @@ describe('creating the approved plan', () => {
     expect(state.tasks).toHaveLength(2);
   });
 
-  test('a failure partway names what was created, and running again creates only the rest', async () => {
+  const keys = (written: { key: string }[]) => written.map(entry => entry.key);
+
+  test('a creation the tracker refuses names what this run created, and running again creates only the rest', async () => {
     const state = tracker();
     const { target, file } = await approved(state);
+    state.failCreatesAfter = 0;
+    const first = await refusal(createPlannedTasks(target.tracker, file));
+    expect(first.message).toBe(
+      "the tracker refused to create lot-reception-check: POST /api/tasks failed with 500: Internal Server Error This run created no task before it. Running the create step again recovers what this run created and creates the rest."
+    );
+    expect(state.tasks).toEqual([]);
+
+    state.requests.length = 0;
     state.failCreatesAfter = 1;
     await expect(createPlannedTasks(target.tracker, file)).rejects.toThrow(
-      'creating part-lot-link failed after this run created lot-reception-check; running the intake\'s create step again recovers what was created'
+      'the tracker refused to create part-lot-link: POST /api/tasks failed with 500: Internal Server Error This run created lot-reception-check before it, each read back as sent. Running the create step again'
     );
     state.failCreatesAfter = undefined;
     const again = await createPlannedTasks(target.tracker, file);
-    expect([again.recovered.map(entry => entry.key), again.created.map(entry => entry.key)]).toEqual([['lot-reception-check'], ['part-lot-link']]);
+    expect([keys(again.recovered), keys(again.created)]).toEqual([['lot-reception-check'], ['part-lot-link']]);
     expect(state.tasks.map(task => task.title)).toEqual(['Build lot-reception-check', 'Build part-lot-link']);
+  });
+
+  test('a task stored but not read back is reported as unconfirmed, not as never created, and a rerun recovers it by its marker', async () => {
+    const state = tracker();
+    const { target, file } = await approved(state);
+    state.failReadBack = true;
+    const error = await refusal(createPlannedTasks(target.tracker, file));
+    expect(error.cause).toBeInstanceOf(UnconfirmedTaskError);
+    expect((error.cause as UnconfirmedTaskError).taskId).toBe('task-1');
+    expect(error.message).toStartWith(
+      'creating lot-reception-check was not confirmed: the tracker created task task-1 but did not read it back: GET /api/tasks/task-1 failed with 500: Internal Server Error Check it before running again'
+    );
+    expect(error.message).toContain('Its marker is <!-- archon-project-intake lot-reception-check -->. This run created no task before it.');
+    expect(error.message).not.toContain('refused');
+    expect(error.message).not.toContain('Running the create step again recovers');
+
+    state.failReadBack = false;
+    const again = await createPlannedTasks(target.tracker, file);
+    expect([keys(again.recovered), keys(again.created)]).toEqual([['lot-reception-check'], ['part-lot-link']]);
+    expect(state.tasks).toHaveLength(2);
+  });
+
+  test.each([
+    ['alters its description below the marker', (task: Task) => ({ ...task, description: (task.description ?? '').replace('**Priority:** high', '**Priority:** none') }), true],
+    ['strips its HTML comments', (task: Task) => ({ ...task, description: (task.description ?? '').replace(/<!--[\s\S]*?-->\n?/g, '') }), false],
+  ])('a task the tracker %s is reported as unconfirmed with its id, and recovered only when its marker survived', async (_case, stores, recoverable) => {
+    const state = tracker();
+    const { target, file } = await approved(state);
+    state.stores = stores;
+    const error = await refusal(createPlannedTasks(target.tracker, file));
+    expect(error.message).toStartWith(
+      'creating lot-reception-check was not confirmed: the tracker created task task-1 but reads back a different description than was sent, so it is not reported as filed. Check it before running again'
+    );
+    expect(error.message).not.toContain('Running the create step again recovers');
+
+    state.stores = undefined;
+    const again = await createPlannedTasks(target.tracker, file);
+    expect(keys(again.recovered)).toEqual(recoverable ? ['lot-reception-check'] : []);
+    expect(state.tasks).toHaveLength(recoverable ? 2 : 3);
+  });
+
+  test('refuses before any request a description a document title would fill with task metadata', async () => {
+    const state = tracker([spec('doc-1', SPEC_TEXT, 'Spec <!-- archon-discovery quoted -->')]);
+    const { target, file } = await approved(state);
+    await expect(createPlannedTasks(target.tracker, file)).rejects.toThrow(
+      "nothing was written: task lot-reception-check's description would hold archon-discovery metadata"
+    );
+    expect(state.requests).toEqual([]);
   });
 
   test('refuses before any write when two tasks carry one key or intake metadata is corrupt', async () => {
@@ -621,17 +730,104 @@ describe('the workflow scripts', () => {
       expect(JSON.parse(rerun.stdout)).toMatchObject({ created: [], recovered: [{ key: 'lot-reception-check' }, { key: 'part-lot-link' }] });
       expect(state.tasks).toHaveLength(2);
 
+      // A later intake hands the plan agent those tasks, archived ones included, through tasks.json.
+      (state.tasks[0] as Task).archived = true;
+      expect(await runScript('sources', root, artifacts, base)).toMatchObject({ code: 0, stderr: '' });
+      expect(parseIntakeTaskSummaries(JSON.parse(readFileSync(join(artifacts, 'intake/tasks.json'), 'utf8')))).toEqual([
+        { key: 'lot-reception-check', title: 'Build lot-reception-check', status: 'todo', archived: true, url: `${base}/api/tasks/task-1` },
+        { key: 'part-lot-link', title: 'Build part-lot-link', status: 'todo', archived: false, url: `${base}/api/tasks/task-2` },
+      ]);
+
       expect(git(root, 'status', '--porcelain', '--ignored') + git(root, 'rev-parse', 'HEAD')).toBe(before);
     } finally {
       server.stop(true);
     }
   }, 60_000);
 
+  const servers: { stop: (force: boolean) => unknown }[] = [];
+  afterEach(() => {
+    for (const server of servers.splice(0)) server.stop(true);
+  });
+
+  function serve(state: Tracker): string {
+    const server = Bun.serve({ port: 0, hostname: '127.0.0.1', fetch: request => handle(state, request) });
+    servers.push(server);
+    return `http://127.0.0.1:${String(server.port)}`;
+  }
+
+  /** A checkout whose intake ran sources and proposal against `state`, ready for create. */
+  async function proposed(state: Tracker) {
+    const base = serve(state);
+    const root = checkout();
+    const artifacts = track(mkdtempSync(join(tmpdir(), 'project-intake-artifacts-')));
+    expect(await runScript('sources', root, artifacts, base)).toMatchObject({ code: 0, stderr: '' });
+    expect(await runScript('proposal', root, artifacts, base, { INPUTS_PLAN: JSON.stringify(plan()) })).toMatchObject({ code: 0, stderr: '' });
+    return { base, root, artifacts };
+  }
+
+  const posts = (state: Tracker) => state.requests.filter(request => request.method === 'POST');
+
+  test('create refuses before any task is posted when a specification changed after the plan', async () => {
+    const state = tracker();
+    const { base, root, artifacts } = await proposed(state);
+    Object.assign(state.docs[0] as Doc, { content: { markdown: `${SPEC_TEXT}\nUne exigence ajoutée après l'approbation.` } });
+
+    const create = await runScript('create', root, artifacts, base);
+    expect(create.code).toBe(1);
+    expect(create.stdout).toBe('');
+    expect(create.stderr).toContain("nothing was written: the project's specifications changed since they were analysed (edited doc-1)");
+    expect(posts(state)).toEqual([]);
+    expect(state.tasks).toEqual([]);
+  }, 60_000);
+
+  test('create refuses before any task is posted when the tracker it would write to is not the one planned against', async () => {
+    const state = tracker();
+    const { base, root, artifacts } = await proposed(state);
+    // Another tracker serving the same project and specifications: only the target guard tells them apart.
+    const elsewhere = tracker(structuredClone(state.docs));
+    const other = serve(elsewhere);
+
+    const create = await runScript('create', root, artifacts, other);
+    expect(create.code).toBe(1);
+    expect(create.stderr).toContain(`nothing was written: ARCHON_TRACKER_BASE_URL now names ${other}/, not ${base}/`);
+    expect([posts(state), posts(elsewhere)]).toEqual([[], []]);
+    expect([state.tasks, elsewhere.tasks]).toEqual([[], []]);
+  }, 60_000);
+
+  test('create refuses before any task is posted when the project file now names another project', async () => {
+    const state = tracker();
+    const { base, root, artifacts } = await proposed(state);
+    writeFileSync(join(root, '.factory/project.yaml'), projectYaml('archon', OTHER_PROJECT));
+    state.project.id = OTHER_PROJECT;
+
+    const create = await runScript('create', root, artifacts, base);
+    expect(create.code).toBe(1);
+    expect(create.stderr).toContain(`nothing was written: .factory/project.yaml now names project ${OTHER_PROJECT}, not ${PROJECT_ID}`);
+    expect(posts(state)).toEqual([]);
+  }, 60_000);
+
+  test('proposal refuses a tasks.json or sources.json the sources node did not write', async () => {
+    const state = tracker();
+    const { base, root, artifacts } = await proposed(state);
+    const valid = readFileSync(join(artifacts, 'intake/tasks.json'), 'utf8');
+    const summaries = JSON.parse(valid) as Record<string, unknown>[];
+    writeFileSync(join(artifacts, 'intake/tasks.json'), JSON.stringify([...summaries, { key: 'not a key', title: 't', status: 'todo', archived: false, url: base }]));
+    const tasks = await runScript('proposal', root, artifacts, base, { INPUTS_PLAN: JSON.stringify(plan()) });
+    expect(tasks.code).toBe(1);
+    expect(tasks.stderr).toContain('project intake proposal: intake/tasks.json is not what this workflow wrote: tasks[0].key does not match');
+
+    writeFileSync(join(artifacts, 'intake/tasks.json'), valid);
+    writeFileSync(join(artifacts, 'intake/sources.json'), JSON.stringify({ documents: [{ id: 'doc-1' }] }));
+    const sources = await runScript('proposal', root, artifacts, base, { INPUTS_PLAN: JSON.stringify(plan()) });
+    expect(sources.code).toBe(1);
+    expect(sources.stderr).toContain('project intake proposal: intake/sources.json is not what this workflow wrote');
+  }, 60_000);
+
   test('an insufficient plan stops before the operator is asked', async () => {
     const root = checkout();
     const artifacts = track(mkdtempSync(join(tmpdir(), 'project-intake-artifacts-')));
     mkdirSync(join(artifacts, 'intake'));
-    writeFileSync(join(artifacts, 'intake/sources.json'), JSON.stringify({ documents: [{ id: 'doc-1' }] }));
+    writeFileSync(join(artifacts, 'intake/sources.json'), JSON.stringify(await sourcesOf(tracker())));
     writeFileSync(join(artifacts, 'intake/tasks.json'), '[]');
     const insufficient = plan({ status: 'insufficient', reason: 'The document holds only a title.', lots: [], tasks: [], assumptions: [], open_questions: [] });
     const run = await runScript('proposal', root, artifacts, BASE, { INPUTS_PLAN: JSON.stringify(insufficient) });
